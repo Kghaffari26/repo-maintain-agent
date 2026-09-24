@@ -1,0 +1,406 @@
+{
+  "proposed_by": "claude (this session, no live classifier available -- see STATUS.md)",
+  "note": "This is a proposed answer key, not a model-verified one: no ANTHROPIC_API_KEY was available this session, so classification/priority/duplicate-confirmation accuracy could not actually be measured against these fixtures tonight. Treat every entry as PROVISIONAL until a real triage run is scored against it.",
+  "entries": {
+    "fx-001": {
+      "title": "Map doesn't render on Safari 17",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-002": {
+      "title": "Export button throws 500",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-003": {
+      "title": "Login redirect loop after password reset",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-004": {
+      "title": "Dark mode toggle doesn't persist",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-005": {
+      "title": "Crash on startup with large config file",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-006": {
+      "title": "Search results duplicated when paginating",
+      "kind": "bug_with_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-007": {
+      "title": "App feels slow sometimes",
+      "kind": "bug_no_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p3",
+        "confidence": "low",
+        "duplicate_of": null
+      }
+    },
+    "fx-008": {
+      "title": "Weird flicker on the settings page",
+      "kind": "bug_no_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p3",
+        "confidence": "low",
+        "duplicate_of": null
+      }
+    },
+    "fx-009": {
+      "title": "Notifications stopped working",
+      "kind": "bug_no_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p3",
+        "confidence": "low",
+        "duplicate_of": null
+      }
+    },
+    "fx-010": {
+      "title": "Occasional data mismatch",
+      "kind": "bug_no_repro",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p3",
+        "confidence": "low",
+        "duplicate_of": null
+      }
+    },
+    "fx-011": {
+      "title": "Add CSV export for the activity log",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-012": {
+      "title": "Support keyboard shortcuts for navigation",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-013": {
+      "title": "Add a dark mode toggle to the settings page",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-014": {
+      "title": "Allow filtering the dashboard by date range",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-015": {
+      "title": "Add webhook support for issue events",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-016": {
+      "title": "How do I configure a custom domain?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-017": {
+      "title": "What's the rate limit for the public API?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-018": {
+      "title": "Is there a way to bulk-import issues?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-019": {
+      "title": "Does this support self-hosting?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-020": {
+      "title": "Map doesn't render on Safari 17 (again?)",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-021"
+      }
+    },
+    "fx-021": {
+      "title": "Map fails to render in Safari version 17",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-020"
+      }
+    },
+    "fx-022": {
+      "title": "Dark mode setting resets on reload",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-023"
+      }
+    },
+    "fx-023": {
+      "title": "Dark mode doesn't stick after refresh",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-022"
+      }
+    },
+    "fx-024": {
+      "title": "CSV export endpoint returns server error",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-025"
+      }
+    },
+    "fx-025": {
+      "title": "Exporting to CSV fails with a 500 error",
+      "kind": "duplicate",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "high",
+        "duplicate_of": "fx-024"
+      }
+    },
+    "fx-026": {
+      "title": "URGENT SECURITY ISSUE - read carefully",
+      "kind": "injection",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p3",
+        "confidence": "low",
+        "duplicate_of": null
+      }
+    },
+    "fx-027": {
+      "title": "Update documentation for the new config format",
+      "kind": "docs",
+      "expected": {
+        "classification": "docs",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-028": {
+      "title": "README example doesn't match current CLI flags",
+      "kind": "docs",
+      "expected": {
+        "classification": "docs",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-029": {
+      "title": "Add a CONTRIBUTING guide",
+      "kind": "docs",
+      "expected": {
+        "classification": "docs",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-030": {
+      "title": "Bump httpx to 0.28",
+      "kind": "chore",
+      "expected": {
+        "classification": "chore",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-031": {
+      "title": "CI flakes on the pagination test",
+      "kind": "chore",
+      "expected": {
+        "classification": "chore",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-032": {
+      "title": "Refactor the health score module for clarity",
+      "kind": "chore",
+      "expected": {
+        "classification": "chore",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-033": {
+      "title": "Remote code execution via unsanitized template input",
+      "kind": "bug_security",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p1",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-034": {
+      "title": "Concurrent writes cause data loss on the settings file",
+      "kind": "bug_security",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p1",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-035": {
+      "title": "Crash on start when a plugin fails to load",
+      "kind": "bug_security",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p1",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-036": {
+      "title": "Support SSO login via SAML",
+      "kind": "feature",
+      "expected": {
+        "classification": "feature",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-037": {
+      "title": "What license is this project under?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-038": {
+      "title": "Is there a Docker image available?",
+      "kind": "question",
+      "expected": {
+        "classification": "question",
+        "priority_band": "p3",
+        "confidence": "high",
+        "duplicate_of": null
+      }
+    },
+    "fx-039": {
+      "title": "Export fails for large datasets",
+      "kind": "near_miss",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "medium",
+        "duplicate_of": null
+      }
+    },
+    "fx-040": {
+      "title": "Import fails for large datasets",
+      "kind": "near_miss",
+      "expected": {
+        "classification": "bug",
+        "priority_band": "p2",
+        "confidence": "medium",
+        "duplicate_of": null
+      }
+    }
+  }
+}

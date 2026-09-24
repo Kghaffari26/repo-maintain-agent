@@ -28,7 +28,7 @@ _SECRET_PATTERNS = [
     re.compile(r"AKIA[A-Z0-9]{12,}"),
     re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"),
 ]
-_REJECT_PHRASES = [TRIAGE_MARKER, "ignore previous"]
+_REJECT_PHRASES = [TRIAGE_MARKER, "ignore previous", "system prompt"]
 
 
 @dataclass
