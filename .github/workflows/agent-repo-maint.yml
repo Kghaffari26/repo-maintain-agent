@@ -1,0 +1,111 @@
+# SPEC_REPO_MAINT.md §8.6, §10: two least-privilege jobs, one per mode.
+#
+# NOT using the agents-core reusable workflow (Kghaffari26/agents-core/.github/
+# workflows/run-agent.yml@main) tonight's instructions asked for -- see
+# DECISIONS.md for the full reasoning. Short version: that workflow (a) hard-
+# codes `permissions: contents: write` at the job level with no way to also
+# request issues:read/write or pull-requests:read per call, which is exactly
+# what this file's two-job split needs to express, and a called reusable
+# workflow's effective GITHUB_TOKEN permissions can never exceed what it
+# itself declares; and (b) its `run:` step shells out to `core.runner`
+# against `site/public/data`, the agents-hub monorepo's own layout, which
+# this standalone repo doesn't have. Once agents-core is packaged as an
+# installable `agents_core` (see STATUS.md, "Needed from agents-core") and/or
+# gets a reusable workflow that supports per-job permissions, replace the
+# `run` steps below with a call to it.
+name: Repo maintenance agent
+
+on:
+  schedule:
+    - cron: "0 14 * * *" # 07:00 PT
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma-separated repo full_names to run against (optional; default is every repo in config/repos.toml)"
+        required: false
+        type: string
+
+concurrency:
+  group: repo-maint-data-commit
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report (read-only)
+    if: vars.APPLY_CHANGES != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO_MAINT_TOKEN: ${{ secrets.REPO_MAINT_TOKEN }}
+      MAX_RUN_USD: "0.25"
+      REPOS_FILTER: ${{ inputs.repos }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Run repo_maint (report mode)
+        run: uv run python -m scripts.run_agent
+      - name: Commit data
+        run: |
+          git config user.name "repo-maint-agent[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public-data/repo_maint data/repo_maint
+          if git diff --cached --quiet; then
+            echo "no data changes"
+            exit 0
+          fi
+          git commit -m "data(repo_maint): report run $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3 4; do
+            git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}" && break
+            sleep $((2 ** i))
+          done
+
+  apply:
+    name: Apply (labels + one triage comment per eligible issue)
+    if: vars.APPLY_CHANGES == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO_MAINT_TOKEN: ${{ secrets.REPO_MAINT_TOKEN }}
+      APPLY_CHANGES: ${{ vars.APPLY_CHANGES }}
+      MAX_RUN_USD: "0.25"
+      REPOS_FILTER: ${{ inputs.repos }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Run repo_maint (apply mode)
+        # --apply is gate 1 of 5 (§8.1); this job only runs when vars.APPLY_CHANGES
+        # == 'true' (gate 2), and each repo also needs allow_apply=true, role
+        # own/sandbox, and a resolvable token (gates 3-5) before anything writes.
+        run: uv run python -m scripts.run_agent --apply
+      - name: Commit data
+        run: |
+          git config user.name "repo-maint-agent[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public-data/repo_maint data/repo_maint
+          if git diff --cached --quiet; then
+            echo "no data changes"
+            exit 0
+          fi
+          git commit -m "data(repo_maint): apply run $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3 4; do
+            git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}" && break
+            sleep $((2 ** i))
+          done
