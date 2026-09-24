@@ -9,13 +9,11 @@ import httpx
 import pytest
 
 from agents.repo_maint import gh
-from core.http import HttpClient
+from tests.repo_maint.fakes import FakeHttpClient
 
 
 def _client(handler) -> gh.GitHubClient:
-    transport = httpx.MockTransport(handler)
-    http = HttpClient(base_url=gh.GITHUB_API_BASE, transport=transport)
-    return gh.GitHubClient(token="fake-token", http=http)
+    return gh.GitHubClient(http=FakeHttpClient(handler))
 
 
 # -- pagination -----------------------------------------------------------
@@ -106,6 +104,19 @@ def test_get_json_returns_fresh_etag_on_200():
     assert page.items == [{"full_name": "o/r"}]
 
 
+def test_get_json_returns_empty_on_404():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404, json={"message": "Not Found"}, headers={"x-ratelimit-remaining": "4999"}
+        )
+
+    client = _client(handler)
+    page = client.get_json("/repos/o/r/releases/latest")
+
+    assert page.items == []
+    assert page.not_modified is False
+
+
 # -- rate-limit guard -------------------------------------------------------
 
 
@@ -170,7 +181,9 @@ def test_add_comment_posts_expected_payload():
 
 def test_writes_raise_on_error_status():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"message": "nope"}, headers={"x-ratelimit-remaining": "4999"})
+        return httpx.Response(
+            422, json={"message": "nope"}, headers={"x-ratelimit-remaining": "4999"}
+        )
 
     client = _client(handler)
     with pytest.raises(gh.GitHubRequestError):
@@ -201,6 +214,13 @@ def test_resolve_token_missing_raises(monkeypatch):
 def test_resolve_token_unknown_name_raises():
     with pytest.raises(ValueError):
         gh.resolve_token("something_else")
+
+
+def test_default_headers_includes_bearer_token():
+    headers = gh.default_headers("abc123")
+    assert headers["Authorization"] == "Bearer abc123"
+    assert headers["Accept"] == gh.GITHUB_ACCEPT
+    assert headers["X-GitHub-Api-Version"] == gh.GITHUB_API_VERSION
 
 
 # -- introspection: no write methods beyond the two allowed (§8.2, §11) -----
@@ -244,3 +264,13 @@ def test_github_client_has_no_other_public_write_looking_methods():
         if name.startswith(write_ish_prefixes) and name != "close"
     }
     assert write_ish == {"add_labels", "add_comment"}
+
+
+def test_gh_module_does_not_implement_its_own_networking():
+    """Hard rule for tonight: gh.py must not implement retries/backoff/caching
+    itself -- that belongs to agents_core.http. It should only ever call
+    ``self._http.request(...)`` on the injected client."""
+    source = inspect.getsource(gh)
+    assert "import httpx" not in source
+    assert "httpx.Client" not in source
+    assert "time.sleep" not in source

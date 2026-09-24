@@ -1,19 +1,26 @@
 """Thin GitHub REST client for the repo maintenance agent (SPEC_REPO_MAINT.md §3, §8.2).
 
-This module is deliberately narrow: it exposes conditional-GET reads with
-pagination, a rate-limit guard, and **exactly two** write operations
-(``add_labels`` and ``add_comment``). There are no other write endpoints
-here on purpose, so the rest of the agent cannot express any write the
-spec doesn't allow -- see ``test_gh_client.py::test_only_two_write_methods_exist``.
+This module has **no networking implementation of its own** -- per tonight's
+hard rule ("never write your own http module"), it takes an already-built
+HTTP client injected by the caller and only knows how to build GitHub
+requests and interpret responses. In production that injected client is
+``agents_core.http.HttpClient``; until that package is installable (see
+STATUS.md, "Needed from agents-core"), tests and the one-off report run
+inject a small local stand-in instead (``tests/repo_maint/fakes.py`` /
+``scripts/run_report_once.py``).
+
+The client exposes **exactly two** write operations (``add_labels`` and
+``add_comment``). There are no other write endpoints here on purpose, so
+the rest of the agent cannot express any write the spec doesn't allow --
+see ``test_gh_client.py::test_only_two_write_methods_exist``.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
-
-from core.http import HttpClient, HttpResponse
+from typing import Any, Protocol
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_ACCEPT = "application/vnd.github+json"
@@ -60,6 +67,31 @@ def resolve_token(token_name: str) -> str:
     return value
 
 
+def default_headers(token: str) -> dict[str, str]:
+    """The headers a caller should construct its injected HTTP client with."""
+    return {
+        "Accept": GITHUB_ACCEPT,
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "Authorization": f"Bearer {token}",
+    }
+
+
+class HttpResponseLike(Protocol):
+    """The minimal response shape this module needs. ``agents_core.http``'s
+    response type satisfies this structurally, as does any test fake."""
+
+    status_code: int
+    headers: Any  # a mapping-like object with a case-insensitive .get(name)
+    json_body: Any
+    text: str
+
+
+class HttpClientLike(Protocol):
+    """The minimal client shape this module needs from an injected HTTP client."""
+
+    def request(self, method: str, url: str, **kwargs: Any) -> HttpResponseLike: ...
+
+
 @dataclass
 class Page:
     """The result of a (possibly paginated) GitHub list read."""
@@ -70,22 +102,15 @@ class Page:
 
 
 class GitHubClient:
-    """A per-(repo, token) GitHub REST client.
+    """A per-(repo, token) GitHub REST client wrapping an injected HTTP client.
 
     ETags are passed in and returned by the caller rather than cached
     internally, so ``data/repo_maint/state.json`` stays the single source
     of truth for what's cached.
     """
 
-    def __init__(self, token: str, http: HttpClient | None = None) -> None:
-        self._http = http or HttpClient(
-            base_url=GITHUB_API_BASE,
-            default_headers={
-                "Accept": GITHUB_ACCEPT,
-                "X-GitHub-Api-Version": GITHUB_API_VERSION,
-                "Authorization": f"Bearer {token}",
-            },
-        )
+    def __init__(self, http: HttpClientLike) -> None:
+        self._http = http
         self.rate_limit_remaining: int | None = None
         self.requests_made = 0
         self.not_modified_count = 0
@@ -98,14 +123,14 @@ class GitHubClient:
                 f"x-ratelimit-remaining {self.rate_limit_remaining} < floor {RATE_LIMIT_FLOOR}"
             )
 
-    def _record_rate_limit(self, response: HttpResponse) -> None:
+    def _record_rate_limit(self, response: HttpResponseLike) -> None:
         remaining = response.headers.get("x-ratelimit-remaining")
         if remaining is not None:
             self.rate_limit_remaining = int(remaining)
 
     def _get(
         self, path: str, *, etag: str | None = None, params: dict[str, Any] | None = None
-    ) -> HttpResponse:
+    ) -> HttpResponseLike:
         self._check_rate_limit()
         headers = {"If-None-Match": etag} if etag else {}
         response = self._http.request("GET", path, params=params, headers=headers)
@@ -124,6 +149,8 @@ class GitHubClient:
         response = self._get(path, etag=etag, params=params)
         if response.status_code == 304:
             return Page(items=[], etag=etag, not_modified=True)
+        if response.status_code == 404:
+            return Page(items=[], etag=None, not_modified=False)
         if response.status_code >= 400:
             raise GitHubRequestError(f"GET {path} failed: {response.status_code} {response.text}")
         body = response.json_body
@@ -177,7 +204,7 @@ class GitHubClient:
 
     def add_labels(
         self, owner: str, repo: str, issue_number: int, labels: Iterable[str]
-    ) -> HttpResponse:
+    ) -> HttpResponseLike:
         """``POST /repos/{owner}/{repo}/issues/{issue_number}/labels`` (§8.2)."""
         self._check_rate_limit()
         response = self._http.request(
@@ -191,7 +218,7 @@ class GitHubClient:
             raise GitHubRequestError(f"add_labels failed: {response.status_code} {response.text}")
         return response
 
-    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> HttpResponse:
+    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> HttpResponseLike:
         """``POST /repos/{owner}/{repo}/issues/{issue_number}/comments`` (§8.2)."""
         self._check_rate_limit()
         response = self._http.request(
@@ -204,15 +231,6 @@ class GitHubClient:
         if response.status_code >= 400:
             raise GitHubRequestError(f"add_comment failed: {response.status_code} {response.text}")
         return response
-
-    def close(self) -> None:
-        self._http.close()
-
-    def __enter__(self) -> "GitHubClient":
-        return self
-
-    def __exit__(self, *exc_info: Any) -> None:
-        self.close()
 
 
 def _next_link(link_header: str | None) -> str | None:

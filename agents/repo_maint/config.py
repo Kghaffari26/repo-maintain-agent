@@ -8,17 +8,12 @@ rather than failing later at write time.
 
 from __future__ import annotations
 
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 Role = Literal["own", "sandbox", "public_demo"]
 TokenName = Literal["default", "repo_maint"]
@@ -80,7 +75,7 @@ class RepoConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
-    def _public_demo_cannot_apply(self) -> "RepoConfig":
+    def _public_demo_cannot_apply(self) -> RepoConfig:
         # §8.1 gate 4 / §13 acceptance criteria: this must fail to *load*,
         # not just fail the gate check at write time.
         if self.role == "public_demo" and self.allow_apply:
@@ -117,7 +112,7 @@ class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
-    def _full_names_are_unique(self) -> "Config":
+    def _full_names_are_unique(self) -> Config:
         names = [r.full_name for r in self.repo]
         duplicates = {name for name in names if names.count(name) > 1}
         if duplicates:

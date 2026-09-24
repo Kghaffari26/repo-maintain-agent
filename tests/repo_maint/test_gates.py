@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import textwrap
 from pathlib import Path
 
@@ -10,7 +9,6 @@ import pytest
 from pydantic import ValidationError
 
 from agents.repo_maint.config import (
-    Config,
     RepoConfig,
     check_write_gates,
     load_config,
@@ -139,7 +137,9 @@ GATE_COMBINATIONS = [
 @pytest.mark.parametrize(
     "role,allow_apply,apply_flag,apply_changes_env,token_available", GATE_COMBINATIONS
 )
-def test_write_gates_every_combination(role, allow_apply, apply_flag, apply_changes_env, token_available):
+def test_write_gates_every_combination(
+    role, allow_apply, apply_flag, apply_changes_env, token_available
+):
     repo = make_repo(role=role, allow_apply=allow_apply)
     result = check_write_gates(
         repo,
