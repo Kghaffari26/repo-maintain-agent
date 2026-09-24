@@ -72,7 +72,8 @@ def make_handler(on_request=None):
 
         if path == "/repos/you/widgets":
             body = {"default_branch": "main", "full_name": "you/widgets"}
-            return httpx.Response(200, json=body, headers=headers)
+            meta_headers = {**headers, "etag": 'W/"meta-etag"'}
+            return httpx.Response(200, json=body, headers=meta_headers)
         if path == "/repos/you/widgets/labels":
             labels = [{"name": "bug"}, {"name": "enhancement"}]
             return httpx.Response(200, json=labels, headers=headers)
@@ -84,7 +85,8 @@ def make_handler(on_request=None):
                 _issue(1, "Crash on load", "2026-09-01T00:00:00Z", body="It crashes."),
                 _issue(2, "Add export button", "2026-09-10T00:00:00Z", body="Please add export."),
             ]
-            return httpx.Response(200, json=issues, headers=headers)
+            issues_headers = {**headers, "etag": 'W/"issues-etag"'} if state == "open" else headers
+            return httpx.Response(200, json=issues, headers=issues_headers)
         if path in ("/repos/you/widgets/issues/1/comments", "/repos/you/widgets/issues/2/comments"):
             return httpx.Response(200, json=[], headers=headers)
         if path == "/repos/you/widgets/pulls":
@@ -167,3 +169,43 @@ def test_pipeline_populates_state_changelog_cache():
     repo_state = state.repos["you/widgets"]
     assert repo_state.changelog_cache is not None
     assert "markdown" in repo_state.changelog_cache
+
+
+def test_pipeline_persists_etags_for_next_run_conditional_gets():
+    _output, state = _run()
+    repo_state = state.repos["you/widgets"]
+    assert repo_state.etags.get("meta") == 'W/"meta-etag"'
+    assert repo_state.etags.get("issues_open") == 'W/"issues-etag"'
+
+
+def test_pipeline_second_run_sends_prior_etags_as_if_none_match():
+    _output, state = _run()
+
+    seen_if_none_match = {}
+
+    def track(request: httpx.Request) -> None:
+        is_meta = request.url.path == "/repos/you/widgets"
+        is_open_issues = (
+            request.url.path == "/repos/you/widgets/issues"
+            and request.url.params.get("state") == "open"
+        )
+        if is_meta or is_open_issues:
+            seen_if_none_match[request.url.path] = request.headers.get("if-none-match")
+
+    config = Config(settings=Settings(), repo=[REPO])
+
+    def build_client(repo: RepoConfig) -> GitHubClient:
+        return GitHubClient(http=FakeHttpClient(make_handler(track), base_url=BASE_URL))
+
+    run(
+        config,
+        state,
+        build_client,
+        apply_flag=False,
+        apply_changes_env=None,
+        now=NOW,
+        run_id="test-run-2",
+    )
+
+    assert seen_if_none_match["/repos/you/widgets"] == 'W/"meta-etag"'
+    assert seen_if_none_match["/repos/you/widgets/issues"] == 'W/"issues-etag"'

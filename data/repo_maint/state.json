@@ -1,0 +1,42 @@
+{
+  "repos": {
+    "Kghaffari26/agents-core": {
+      "changelog_cache": {
+        "base_ref": null,
+        "markdown": "## Unreleased\n",
+        "narrative_source": "deterministic",
+        "pr_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "commented": [],
+      "etags": {
+        "issues_closed": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "issues_open": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "issues_recent": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "labels": "W/\"9f0d9fc0f19b68e5487cdd8fdae7787eb737a26f8eace7388ad93a14062dbf2f\"",
+        "meta": "W/\"fa4e31c31525ecd924eedbea18ff06bc63c79cdfd22c36871b223c95480b78a8\"",
+        "pulls_open": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\""
+      },
+      "labeled": {},
+      "triage_cache": {}
+    },
+    "Kghaffari26/real-estate-agent": {
+      "changelog_cache": {
+        "base_ref": null,
+        "markdown": "## Unreleased\n",
+        "narrative_source": "deterministic",
+        "pr_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "commented": [],
+      "etags": {
+        "issues_closed": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "issues_open": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "issues_recent": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\"",
+        "labels": "W/\"07d905c15f7c1a50b22e7d7a3f208e61fbf6a43d858e88b711b6dd884fd8302d\"",
+        "meta": "W/\"86176e5dcaf04d445edcf0dcf90fa89c2b0f97401393ac7cab52e759b1e62a6a\"",
+        "pulls_open": "\"7a73f4a39ab007b30730447c9cfb86db9fe40c27c75051f2e4e95c544fee6d80\""
+      },
+      "labeled": {},
+      "triage_cache": {}
+    }
+  }
+}

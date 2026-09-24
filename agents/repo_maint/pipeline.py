@@ -164,7 +164,9 @@ def run_repo(
     settings = config.settings
     penalties = config.health.penalties
 
-    snapshot = fetch_mod.fetch_repo(client, repo, now=now)
+    prior_etags = fetch_mod.RepoEtags(**repo_state.etags)
+    snapshot = fetch_mod.fetch_repo(client, repo, now=now, prior_etags=prior_etags)
+    repo_state.etags = asdict(snapshot.etags)
     default_branch = snapshot.meta.get("default_branch", "main")
 
     # -- untriaged + duplicates ---------------------------------------------
