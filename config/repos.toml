@@ -1,0 +1,46 @@
+[settings]
+stale_days = 14
+include_drafts = false
+dup_threshold = 0.45
+max_triage_per_repo_per_run = 25
+max_changelog_items = 80
+max_writes_per_run = 15
+max_writes_per_repo_per_day = 10
+
+[health.penalties]
+untriaged_7d_each = 3
+untriaged_cap = 30
+stale_pr_each = 5
+stale_pr_cap = 25
+first_response_72h = 10
+first_response_168h = 15
+ci_failure = 20
+release_overdue = 10
+community_missing_each = 3
+
+[[repo]]
+full_name = "kghaffari26/repo-maintain-agent"
+role = "own"
+allow_apply = false
+token = "default"
+label_map = { bug = "bug", feature = "enhancement", question = "question", docs = "documentation", chore = "chore" }
+priority_labels = {}
+extra_triaged_labels = ["triaged"]
+ignore_labels = ["wontfix", "on-hold"]
+
+# Add a sandbox repo here once one exists, with allow_apply = true and
+# token = "repo_maint", to demonstrate apply mode safely (see spec §2, §9):
+#
+# [[repo]]
+# full_name = "kghaffari26/repo-maintain-agent-sandbox"
+# role = "sandbox"
+# allow_apply = true
+# token = "repo_maint"
+# label_map = { bug = "bug", feature = "enhancement", question = "question", docs = "documentation" }
+# priority_labels = { p0 = "priority: critical", p1 = "priority: high", p2 = "priority: medium", p3 = "priority: low" }
+
+# [[repo]]
+# full_name = "some-org/popular-project"
+# role = "public_demo"       # read-only analysis; allow_apply must be false
+# allow_apply = false
+# token = "default"
