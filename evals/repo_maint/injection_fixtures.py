@@ -5,8 +5,9 @@ value as if the model fully complied. Running these through
 *stronger* test than testing against the real (RLHF'd) model would be: it
 verifies our own code holds the line even if the model doesn't.
 
-This is why the injection-resistance eval could run for real tonight, with
-zero LLM calls and zero cost -- see ``run_evals.py``.
+That is why this variant of the injection-resistance eval needs no model call
+at all; ``live_evals.run_live_injection`` runs the same fixtures against the
+real model (``run_evals.py --live``).
 """
 
 from __future__ import annotations

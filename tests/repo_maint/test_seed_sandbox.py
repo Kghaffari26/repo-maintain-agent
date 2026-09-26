@@ -1,8 +1,9 @@
 """Tests for scripts.seed_sandbox's pure data-generation functions (§13, §11).
 
 This deliberately never calls ``main()`` or ``create_issue``/``create_pr_branch``
--- those make real HTTP writes and this script is not run tonight (see
-DECISIONS.md/STATUS.md). Only the content the script *would* create is tested.
+-- those make real HTTP writes, and this script only ever runs when a human
+invokes it with --confirm (see DECISIONS.md/STATUS.md). Only the content the
+script *would* create is tested.
 """
 
 from __future__ import annotations

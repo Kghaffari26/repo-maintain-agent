@@ -17,6 +17,9 @@ from pydantic import BaseModel, Field
 
 class RepoState(BaseModel):
     etags: dict[str, str | None] = Field(default_factory=dict)
+    # The items each current ETag was served with, so a 304 yields real data. Pruned
+    # every run to the ETags still in ``etags`` (see pipeline.collect_repo).
+    etag_bodies: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     triage_cache: dict[str, dict[str, Any]] = Field(default_factory=dict)
     changelog_cache: dict[str, Any] | None = None
     commented: list[int] = Field(default_factory=list)

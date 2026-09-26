@@ -22,6 +22,11 @@ from agents.repo_maint.config import RepoConfig
 from agents.repo_maint.gh import GitHubClient, Page, RateLimitLow
 from agents.repo_maint.metrics import parse_dt
 
+
+class RepoUnavailable(RuntimeError):
+    """The repo's metadata came back empty (404): missing, renamed, or no access."""
+
+
 RECENT_ACTIVITY_WEEKS = 12
 CLOSED_ISSUES_DUP_WINDOW_DAYS = 180
 
@@ -90,6 +95,10 @@ def fetch_repo(
 
     meta_page = safe(lambda: client.get_json(f"/repos/{owner}/{repo_name}", etag=etags.meta))
     meta = (meta_page.items[0] if meta_page and meta_page.items else {}) or {}
+    if meta_page is not None and not meta:
+        # 404: the repo doesn't exist or this token can't see it. Every other
+        # endpoint would 404 too and read as a healthy, empty repo -- fail it instead.
+        raise RepoUnavailable(f"{repo.full_name}: not found or not accessible with its token")
     if meta_page and meta_page.etag:
         etags.meta = meta_page.etag
     default_branch = meta.get("default_branch", "main")
@@ -118,7 +127,7 @@ def fetch_repo(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/issues",
             etag=etags.issues_recent,
-            params={"state": "all", "since": since_12w},
+            params={"state": "all", "since": since_12w, "sort": "updated"},
         )
     )
     recent_activity = recent_page.items if recent_page else []
@@ -131,7 +140,7 @@ def fetch_repo(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/issues",
             etag=etags.issues_closed,
-            params={"state": "closed", "since": since_180d},
+            params={"state": "closed", "since": since_180d, "sort": "updated"},
         )
     )
     closed_items = closed_page.items if closed_page else []
@@ -152,7 +161,7 @@ def fetch_repo(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/pulls",
             etag=etags.pulls_open,
-            params={"state": "open"},
+            params={"state": "open", "sort": "updated", "direction": "desc"},
         )
     )
     open_prs = open_prs_page.items if open_prs_page else []

@@ -12,10 +12,9 @@ which the agent itself must never be able to call. This script talks to
 those endpoints directly and is never imported by anything under
 ``agents/``.
 
-**Not run tonight** (see DECISIONS.md / STATUS.md): the hard safety rule
-for this session is zero write requests to GitHub. This script is written
-and ready, but the sandbox repo doesn't exist yet, and running it is left
-for the morning, after a human has reviewed it.
+**Never run by an agent session** (see DECISIONS.md / STATUS.md): it only
+runs when a human invokes it with ``--confirm`` against a repo configured as
+``role = "sandbox"``. The sandbox repo doesn't exist yet.
 
 What it creates, per §13:
   - ~25 issues: bugs with repro steps, bugs without repro steps, feature
@@ -40,10 +39,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+from agents_core.http import Http
 
 from agents.repo_maint.config import load_config
-from agents.repo_maint.gh import GITHUB_ACCEPT, GITHUB_API_BASE, GITHUB_API_VERSION, resolve_token
+from agents.repo_maint.gh import GITHUB_API_BASE, default_headers, resolve_token
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "repos.toml"
 
@@ -280,34 +279,27 @@ def _guard_target_repo(full_name: str) -> None:
         )
 
 
-def _client(token: str) -> httpx.Client:
-    return httpx.Client(
-        base_url=GITHUB_API_BASE,
-        headers={
-            "Accept": GITHUB_ACCEPT,
-            "X-GitHub-Api-Version": GITHUB_API_VERSION,
-            "Authorization": f"Bearer {token}",
-        },
-        timeout=30.0,
-    )
-
-
-def create_issue(client: httpx.Client, owner: str, repo: str, issue: SeedIssue) -> int:
+def create_issue(http: Http, token: str, owner: str, repo: str, issue: SeedIssue) -> int:
     payload = {"title": issue.title, "body": issue.body}
-    response = client.post(f"/repos/{owner}/{repo}/issues", json=payload)
-    response.raise_for_status()
+    response = http.request(
+        "POST",
+        f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues",
+        headers=default_headers(token),
+        json_body=payload,
+        ttl_seconds=0,
+    )
     number = response.json()["number"]
     print(f"  created issue #{number} ({issue.kind}): {issue.title}")
     return number
 
 
 def create_pr_branch(
-    client: httpx.Client, owner: str, repo: str, pr: SeedPR, default_branch: str
+    http: Http, token: str, owner: str, repo: str, pr: SeedPR, default_branch: str
 ) -> None:
     """Creates a throwaway branch with a trivial commit via the Contents API,
     then opens a PR from it. Left as an outline: the exact commit content
     depends on the sandbox repo's structure at seed time, which doesn't
-    exist yet tonight."""
+    exist yet."""
     raise NotImplementedError(
         "branch/commit creation depends on the sandbox repo's actual file layout; "
         "fill this in once the sandbox repo exists (see STATUS.md)"
@@ -335,14 +327,14 @@ def main() -> int:
     prs = build_prs()
     print(f"About to create {len(issues)} issues and {len(prs)} PRs in {args.repo}.")
 
-    with _client(token) as client:
+    with Http() as http:
         for issue in issues:
-            create_issue(client, owner, repo, issue)
+            create_issue(http, token, owner, repo, issue)
             time.sleep(0.5)  # be polite to the secondary rate limit
 
         for pr in prs:
             try:
-                create_pr_branch(client, owner, repo, pr, default_branch="main")
+                create_pr_branch(http, token, owner, repo, pr, default_branch="main")
             except NotImplementedError as exc:
                 print(f"  skipped PR {pr.title!r}: {exc}", file=sys.stderr)
 

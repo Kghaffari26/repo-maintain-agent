@@ -1,18 +1,17 @@
-# SPEC_REPO_MAINT.md §8.6, §10: two least-privilege jobs, one per mode.
+# SPEC_REPO_MAINT.md §8.6, §10: two least-privilege jobs, one per mode, both
+# delegating the run itself to the agents-core reusable workflow (which runs
+# `agents-run repo_maint`, commits data/ back to this branch, force-pushes
+# public-data/ to the `data` branch, and notifies the site repo).
 #
-# NOT using the agents-core reusable workflow (Kghaffari26/agents-core/.github/
-# workflows/run-agent.yml@main) tonight's instructions asked for -- see
-# DECISIONS.md for the full reasoning. Short version: that workflow (a) hard-
-# codes `permissions: contents: write` at the job level with no way to also
-# request issues:read/write or pull-requests:read per call, which is exactly
-# what this file's two-job split needs to express, and a called reusable
-# workflow's effective GITHUB_TOKEN permissions can never exceed what it
-# itself declares; and (b) its `run:` step shells out to `core.runner`
-# against `site/public/data`, the agents-hub monorepo's own layout, which
-# this standalone repo doesn't have. Once agents-core is packaged as an
-# installable `agents_core` (see STATUS.md, "Needed from agents-core") and/or
-# gets a reusable workflow that supports per-job permissions, replace the
-# `run` steps below with a call to it.
+# KNOWN LIMITS of run-agent.yml@v0.1.0 (see DECISIONS.md and STATUS.md,
+# "Needed from agents-core"):
+#   - Its own top-level `permissions: contents: write` caps GITHUB_TOKEN inside
+#     the called workflow, so the per-job `issues:`/`pull-requests:` grants below
+#     are declared (and are the ceiling) but can't reach the agent step.
+#   - Its agent step's env only forwards ANTHROPIC_API_KEY (+ FRED/SAM/CENSUS
+#     keys): not GITHUB_TOKEN, REPO_MAINT_TOKEN or APPLY_CHANGES. Until it does,
+#     every repo fails with "GITHUB_TOKEN is not set" and the scheduled run fails
+#     loudly; and apply mode can never pass gate 2 (§8.1), so it fails closed.
 name: Repo maintenance agent
 
 on:
@@ -21,91 +20,70 @@ on:
   workflow_dispatch:
     inputs:
       repos:
-        description: "Comma-separated repo full_names to run against (optional; default is every repo in config/repos.toml)"
+        description: "Comma-separated owner/name list to run against (optional; default: every repo in config/repos.toml)"
         required: false
         type: string
 
 concurrency:
-  group: repo-maint-data-commit
+  group: repo-maint-${{ github.repository }}
   cancel-in-progress: false
 
+permissions: {}
+
 jobs:
+  # The reusable workflow splices extra_args into a shell command, so the free-text
+  # dispatch input is validated here (never interpolated into a script) first.
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      extra_args: ${{ steps.args.outputs.extra_args }}
+    steps:
+      - id: args
+        env:
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REPOS:-}" ]; then
+            echo "extra_args=" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPOS" =~ ^[A-Za-z0-9._/,-]+$ ]]; then
+            echo "extra_args=--repos $REPOS" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::repos may only contain owner/name pairs separated by commas"
+            exit 1
+          fi
+
   report:
     name: Report (read-only)
+    needs: validate
     if: vars.APPLY_CHANGES != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: write
       issues: read
       pull-requests: read
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      REPO_MAINT_TOKEN: ${{ secrets.REPO_MAINT_TOKEN }}
-      MAX_RUN_USD: "0.25"
-      REPOS_FILTER: ${{ inputs.repos }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - run: uv sync --locked --no-dev
-      - name: Run repo_maint (report mode)
-        run: uv run python -m scripts.run_agent
-      - name: Commit data
-        run: |
-          git config user.name "repo-maint-agent[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public-data/repo_maint data/repo_maint
-          if git diff --cached --quiet; then
-            echo "no data changes"
-            exit 0
-          fi
-          git commit -m "data(repo_maint): report run $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3 4; do
-            git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}" && break
-            sleep $((2 ** i))
-          done
+    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.1.0
+    with:
+      agent: repo_maint
+      max_run_usd: "0.25"
+      site_repo: Kghaffari26/agents-hub
+      extra_args: ${{ needs.validate.outputs.extra_args }}
+    secrets: inherit
 
   apply:
     name: Apply (labels + one triage comment per eligible issue)
+    needs: validate
     if: vars.APPLY_CHANGES == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: write
       issues: write
       pull-requests: read
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      REPO_MAINT_TOKEN: ${{ secrets.REPO_MAINT_TOKEN }}
-      APPLY_CHANGES: ${{ vars.APPLY_CHANGES }}
-      MAX_RUN_USD: "0.25"
-      REPOS_FILTER: ${{ inputs.repos }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - run: uv sync --locked --no-dev
-      - name: Run repo_maint (apply mode)
-        # --apply is gate 1 of 5 (§8.1); this job only runs when vars.APPLY_CHANGES
-        # == 'true' (gate 2), and each repo also needs allow_apply=true, role
-        # own/sandbox, and a resolvable token (gates 3-5) before anything writes.
-        run: uv run python -m scripts.run_agent --apply
-      - name: Commit data
-        run: |
-          git config user.name "repo-maint-agent[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public-data/repo_maint data/repo_maint
-          if git diff --cached --quiet; then
-            echo "no data changes"
-            exit 0
-          fi
-          git commit -m "data(repo_maint): apply run $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3 4; do
-            git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}" && break
-            sleep $((2 ** i))
-          done
+    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.1.0
+    with:
+      agent: repo_maint
+      max_run_usd: "0.25"
+      site_repo: Kghaffari26/agents-hub
+      # --apply is gate 1 of 5 (§8.1). Gates 2-5 (APPLY_CHANGES env, allow_apply,
+      # role own/sandbox, a write token) are checked per repo in code.
+      extra_args: --apply ${{ needs.validate.outputs.extra_args }}
+    secrets: inherit

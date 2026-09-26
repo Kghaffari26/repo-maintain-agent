@@ -6,3 +6,4 @@ __pycache__/
 *.egg-info/
 data/repo_maint/state.json.local
 .env
+.cache/

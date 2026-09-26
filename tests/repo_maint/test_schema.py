@@ -5,16 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from agents_core.schema import AgentOutput, ModelUsage, RunMeta
 from pydantic import ValidationError
 
 from agents.repo_maint.schema import (
+    META_EXTRA_KEY,
     ActionEntry,
     Activity12w,
     ChangelogBlock,
     Counts,
     HealthBlock,
     KeyStat,
-    ModelUsage,
     RepoEntry,
     RepoMaintMeta,
     RepoMaintOutput,
@@ -149,3 +150,33 @@ def test_json_schema_export_is_stable_and_has_expected_top_level_keys():
     assert set(schema["properties"]) == expected_keys
     # every field the JSON contract promises is marked required (no optional drift)
     assert set(schema["required"]) == expected_keys
+
+
+# -- agents_core integration ------------------------------------------------------------
+
+
+def test_output_builds_on_agents_core_models():
+    assert issubclass(RepoMaintOutput, AgentOutput)
+    assert issubclass(RepoMaintMeta, RunMeta)
+
+
+def test_meta_extra_is_folded_into_meta_like_agents_core_runner_needs():
+    """agents_core.runner validates {**body, "meta": <its own RunMeta>}; the §6 meta
+    extensions ride in the body under META_EXTRA_KEY and must land in meta."""
+    dumped = make_output().model_dump(mode="json")
+    meta = dumped.pop("meta")
+    runner_meta = {k: v for k, v in meta.items() if k not in {"github_requests", "github_304s"}}
+    body = {**dumped, META_EXTRA_KEY: {"github_requests": 7, "github_304s": 3}}
+
+    output = RepoMaintOutput.model_validate({**body, "meta": runner_meta})
+
+    assert output.meta.github_requests == 7
+    assert output.meta.github_304s == 3
+    assert META_EXTRA_KEY not in output.model_dump(mode="json")
+
+
+def test_meta_extensions_are_required():
+    dumped = make_output().model_dump(mode="json")
+    del dumped["meta"]["github_304s"]
+    with pytest.raises(ValidationError):
+        RepoMaintOutput.model_validate(dumped)

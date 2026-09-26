@@ -1,86 +1,22 @@
-"""Test-only stand-ins for the HTTP/LLM clients this agent expects to be
-injected from ``agents_core`` in production (see DECISIONS.md and
-STATUS.md -- that package isn't installable yet). Nothing here is
-shipped as part of the ``agents`` package; it exists purely so tests
-can exercise ``gh.py``, ``triage.py`` and ``changelog.py`` against
-mocked data instead of the network.
+"""Test-only helpers: the real ``agents_core.http.Http`` and ``agents_core.llm.LLM``,
+driven offline. ``Http`` gets an ``httpx.MockTransport`` (so no request leaves the
+process) and a no-op sleep; ``LLM`` gets a scripted stand-in for the Anthropic
+client object it would otherwise build. Nothing here is shipped in ``agents``.
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
+import itertools
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from agents_core.costs import CostTracker
+from agents_core.http import Http
+from agents_core.llm import LLM
 
-
-@dataclass
-class FakeHttpResponse:
-    status_code: int
-    headers: httpx.Headers
-    json_body: Any
-    text: str
-
-
-class FakeHttpClient:
-    """A minimal ``HttpClientLike`` built on ``httpx.MockTransport``.
-
-    Stands in for ``agents_core.http.HttpClient`` in tests. No retry
-    logic, no caching -- just enough to drive a mocked GitHub API.
-    """
-
-    def __init__(self, handler, base_url: str = "https://api.github.com") -> None:
-        self._client = httpx.Client(base_url=base_url, transport=httpx.MockTransport(handler))
-
-    def request(self, method: str, url: str, **kwargs: Any) -> FakeHttpResponse:
-        response = self._client.request(method, url, **kwargs)
-        body: Any = None
-        if response.content:
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-        return FakeHttpResponse(
-            status_code=response.status_code,
-            headers=response.headers,
-            json_body=body,
-            text=response.text,
-        )
-
-    def close(self) -> None:
-        self._client.close()
-
-
-class FakeClock:
-    """A controllable clock for cache/staleness tests."""
-
-    def __init__(self, start: float = 0.0) -> None:
-        self._now = start
-
-    def now(self) -> float:
-        return self._now
-
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
-
-
-class FakeLLM:
-    """A scripted stand-in for the injectable ``classify``/``draft`` callables.
-
-    Records every call it receives (for assertions) and returns
-    pre-programmed responses in order, or raises if the script runs out.
-    """
-
-    def __init__(self, responses: list[Any]) -> None:
-        self._responses = list(responses)
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        if not self._responses:
-            raise AssertionError("FakeLLM ran out of scripted responses")
-        return self._responses.pop(0)
+from agents.repo_maint.gh import GitHubClient
 
 
 def sleepless(*_args, **_kwargs) -> None:
@@ -88,4 +24,73 @@ def sleepless(*_args, **_kwargs) -> None:
     return None
 
 
-__all__ = ["FakeHttpClient", "FakeHttpResponse", "FakeClock", "FakeLLM", "sleepless", "time"]
+def mock_http(handler, cache_dir: Path | None = None) -> Http:
+    """A real agents_core Http whose network is ``handler`` (httpx.MockTransport)."""
+    return Http(
+        cache_dir=cache_dir or Path("/nonexistent-http-cache"),
+        transport=httpx.MockTransport(handler),
+        sleep=sleepless,
+        max_attempts=1,
+    )
+
+
+def gh_client(handler, **kwargs: Any) -> GitHubClient:
+    return GitHubClient(mock_http(handler), token="test-token", **kwargs)
+
+
+# -- a scripted Anthropic client for agents_core.llm ---------------------------------------
+
+
+class FakeAnthropic:
+    """Stands in for ``anthropic.Anthropic`` inside ``agents_core.llm.LLM``.
+
+    ``responses`` are consumed in order: a ``str`` answers ``messages.create``
+    (plain text), a pydantic model or dict answers ``messages.parse`` (structured
+    output; a dict is validated against the requested ``output_format``).
+    Every call's kwargs are recorded in ``calls``.
+    """
+
+    def __init__(self, responses: list[Any], *, input_tokens: int = 1000, output_tokens: int = 200):
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+        self._usage = SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        self.messages = SimpleNamespace(create=self._create, parse=self._parse)
+        self._ids = itertools.count(1)
+
+    def _next(self, kwargs: dict[str, Any]) -> Any:
+        self.calls.append(kwargs)
+        if not self._responses:
+            raise AssertionError("FakeAnthropic ran out of scripted responses")
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def _message(self, **extra: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=f"msg_{next(self._ids)}", stop_reason="end_turn", usage=self._usage, **extra
+        )
+
+    def _create(self, **kwargs: Any) -> SimpleNamespace:
+        text = self._next(kwargs)
+        return self._message(content=[SimpleNamespace(type="text", text=text)])
+
+    def _parse(self, *, output_format: Any, **kwargs: Any) -> SimpleNamespace:
+        value = self._next({**kwargs, "output_format": output_format})
+        if isinstance(value, dict):
+            value = output_format.model_validate(value)
+        return self._message(content=[], parsed_output=value)
+
+
+def fake_llm(responses: list[Any], tmp_path: Path, *, max_usd: float = 1.0) -> tuple[LLM, Any]:
+    """An ``agents_core.llm.LLM`` over ``FakeAnthropic``, logging costs under tmp_path."""
+    tracker = CostTracker(
+        agent="repo_maint_test", run_id="test", max_usd=max_usd, path=tmp_path / "costs.jsonl"
+    )
+    client = FakeAnthropic(responses)
+    return LLM(tracker, client=client, sleep=sleepless), client

@@ -1,16 +1,19 @@
 """Tests for the evals.repo_maint fixture builders and runner (§11).
 
 These exercise the eval machinery itself (fixture shape, and that the
-real injection/changelog evals actually run and produce the expected
-result shape) -- not a live-model score, which isn't available tonight.
+free injection/changelog evals run and produce the expected result shape),
+plus the live evals' scoring functions and runners against a scripted model.
 """
 
 from __future__ import annotations
 
+from agents.repo_maint.triage import TriageResult
+from evals.repo_maint import live_evals
 from evals.repo_maint.build_fixtures import build_fixtures, build_labels_proposed
 from evals.repo_maint.changelog_fixtures import CHANGELOG_FIXTURES
 from evals.repo_maint.injection_fixtures import INJECTION_FIXTURES
 from evals.repo_maint.run_evals import run_changelog_fidelity, run_injection_resistance
+from tests.repo_maint.fakes import fake_llm
 
 
 def test_build_fixtures_produces_exactly_40():
@@ -82,3 +85,106 @@ def test_run_changelog_fidelity_has_full_ref_coverage_on_all_fixtures():
     assert result["status"] == "ran"
     assert result["ref_coverage_ok_on_all_fixtures"] is True
     assert len(result["findings"]) == 3
+
+
+# -- live-eval scoring (evals/repo_maint/live_evals.py) ------------------------------------
+
+
+
+def _result(number=1, classification="bug", priority="p2", labels=()):
+    return TriageResult(
+        number=number,
+        classification=classification,
+        priority=priority,
+        confidence="high",
+        suggested_labels=list(labels),
+    )
+
+
+def _key(**entries):
+    return {
+        fid: {"expected": {"classification": c, "priority_band": p, "duplicate_of": d}}
+        for fid, (c, p, d) in entries.items()
+    }
+
+
+def test_score_classification_counts_exact_matches():
+    key = _key(a=("bug", "p2", None), b=("feature", "p3", None))
+    score = live_evals.score_classification({"a": _result(), "b": _result()}, key)
+    assert score["accuracy"] == 0.5
+    assert score["passed"] is False
+    assert score["misses"] == [{"id": "b", "expected": "feature", "got": "bug"}]
+
+
+def test_score_priority_within_one_and_security_rule():
+    key = _key(a=("bug", "p2", None), s=("bug", "p1", None))
+    results = {"a": _result(priority="p3"), "s": _result(priority="p2")}
+    score = live_evals.score_priority(results, key, security_ids={"s"})
+    assert score["within_one_rate"] == 1.0
+    assert score["security_all_p0_p1"] is False
+    assert score["passed"] is False
+
+
+def test_score_label_allowlist_reports_raw_rate():
+    raw = {"a": {"suggested_labels": ["bug", "made-up"]}}
+    score = live_evals.score_label_allowlist(raw, {"a": _result(labels=["bug"])}, {"bug"})
+    assert score["raw_model_allowlisted_rate"] == 0.5
+    assert score["raw_labels_outside_allowlist"] == ["made-up"]
+    assert score["passed"] is True
+
+
+def test_score_duplicates_precision_over_candidate_pairs():
+    fixtures = [
+        {"id": "a", "number": 1, "candidates": ["b"]},
+        {"id": "b", "number": 2, "candidates": ["a"]},
+        {"id": "c", "number": 3, "candidates": ["a"]},
+    ]
+    key = _key(a=("bug", "p2", "b"), b=("bug", "p2", "a"), c=("bug", "p2", None))
+    raw = {
+        "a": {"duplicates": [{"number": 2, "duplicate_likely": True}]},
+        "b": {"duplicates": [{"number": 1, "duplicate_likely": False}]},
+        "c": {"duplicates": [{"number": 1, "duplicate_likely": True}]},
+    }
+    score = live_evals.score_duplicates(raw, fixtures, key)
+    assert score["precision"] == 0.5  # 1 true positive, 1 false positive
+    assert score["recall"] == 0.5  # b->a missed
+    assert score["passed"] is False
+
+
+def test_run_triage_fixtures_uses_the_production_classify_path(tmp_path):
+    fixtures = [
+        {
+            "id": "fx-1",
+            "number": 1,
+            "title": "Crash",
+            "body": "It crashes.",
+            "author_association": "NONE",
+            "kind": "bug_no_repro",
+        }
+    ]
+    output = {
+        "classification": "bug",
+        "priority": "p2",
+        "confidence": "high",
+        "suggested_labels": ["bug", "nope"],
+        "missing_info": [],
+        "summary": "Crash.",
+        "duplicates": [],
+        "first_response": "Thanks!",
+    }
+    llm, client = fake_llm([output], tmp_path)
+    raw, results = live_evals.run_triage_fixtures(llm, fixtures)
+    assert raw["fx-1"]["suggested_labels"] == ["bug", "nope"]
+    assert results["fx-1"].suggested_labels == ["bug"]
+    assert len(client.calls) == 1
+
+
+def test_run_live_changelog_scores_first_attempts(tmp_path):
+    responses = []
+    for fixture in CHANGELOG_FIXTURES:
+        refs = " ".join(f"({item.ref})" for item in fixture["items"])
+        responses.append(f"## [Unreleased]\n### Other\n- Everything {refs}\n")
+    llm, _client = fake_llm(responses, tmp_path)
+    result = live_evals.run_live_changelog(llm)
+    assert result["first_attempt_rate"] == 1.0
+    assert result["ref_coverage_ok_on_all_fixtures"] is True

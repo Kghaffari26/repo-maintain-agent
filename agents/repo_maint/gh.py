@@ -1,18 +1,15 @@
 """Thin GitHub REST client for the repo maintenance agent (SPEC_REPO_MAINT.md §3, §8.2).
 
-This module has **no networking implementation of its own** -- per tonight's
-hard rule ("never write your own http module"), it takes an already-built
-HTTP client injected by the caller and only knows how to build GitHub
-requests and interpret responses. In production that injected client is
-``agents_core.http.HttpClient``; until that package is installable (see
-STATUS.md, "Needed from agents-core"), tests and the one-off report run
-inject a small local stand-in instead (``tests/repo_maint/fakes.py`` /
-``scripts/run_report_once.py``).
+This module has **no networking implementation of its own**: every request goes
+through an injected ``agents_core.http.Http`` (retries, backoff, secret-safe
+logging). GitHub reads always pass ``ttl_seconds=0`` so agents_core's on-disk
+dev cache never serves stale issue data; this client does GitHub's own
+conditional requests (ETags) instead.
 
 The client exposes **exactly two** write operations (``add_labels`` and
-``add_comment``). There are no other write endpoints here on purpose, so
-the rest of the agent cannot express any write the spec doesn't allow --
-see ``test_gh_client.py::test_only_two_write_methods_exist``.
+``add_comment``). There are no other write endpoints here on purpose, so the
+rest of the agent cannot express any write the spec doesn't allow -- see
+``test_gh_client.py::test_only_two_write_methods_exist``.
 """
 
 from __future__ import annotations
@@ -20,7 +17,9 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
+
+from agents_core.http import Http, HttpError
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_ACCEPT = "application/vnd.github+json"
@@ -34,6 +33,10 @@ TOKEN_ENV_VARS = {
     "default": "GITHUB_TOKEN",
     "repo_maint": "REPO_MAINT_TOKEN",
 }
+
+#: Statuses that mean "nothing here" rather than a failed run: 404 (no release,
+#: no community profile, ...) and 409 (commit endpoints on an empty repository).
+EMPTY_STATUSES = frozenset({404, 409})
 
 
 class RateLimitLow(RuntimeError):
@@ -68,28 +71,12 @@ def resolve_token(token_name: str) -> str:
 
 
 def default_headers(token: str) -> dict[str, str]:
-    """The headers a caller should construct its injected HTTP client with."""
+    """Headers sent with every GitHub request (§3)."""
     return {
         "Accept": GITHUB_ACCEPT,
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
         "Authorization": f"Bearer {token}",
     }
-
-
-class HttpResponseLike(Protocol):
-    """The minimal response shape this module needs. ``agents_core.http``'s
-    response type satisfies this structurally, as does any test fake."""
-
-    status_code: int
-    headers: Any  # a mapping-like object with a case-insensitive .get(name)
-    json_body: Any
-    text: str
-
-
-class HttpClientLike(Protocol):
-    """The minimal client shape this module needs from an injected HTTP client."""
-
-    def request(self, method: str, url: str, **kwargs: Any) -> HttpResponseLike: ...
 
 
 @dataclass
@@ -101,16 +88,43 @@ class Page:
     not_modified: bool
 
 
-class GitHubClient:
-    """A per-(repo, token) GitHub REST client wrapping an injected HTTP client.
+@dataclass
+class _Result:
+    status: int
+    headers: dict[str, str]
+    body: Any
 
-    ETags are passed in and returned by the caller rather than cached
-    internally, so ``data/repo_maint/state.json`` stays the single source
-    of truth for what's cached.
+
+def _url(path: str) -> str:
+    return path if path.startswith("http") else f"{GITHUB_API_BASE}{path}"
+
+
+def _as_items(body: Any) -> list[dict[str, Any]]:
+    if isinstance(body, list):
+        return body
+    if body is None:
+        return []
+    return [body]
+
+
+class GitHubClient:
+    """A per-(repo, token) GitHub REST client over an injected ``agents_core.http.Http``.
+
+    ``etag_bodies`` maps an ETag to the items it was served with. A conditional
+    request is only sent when that body is known, so a 304 always yields the
+    real (unchanged) data rather than an empty list. The caller persists the
+    mapping in ``data/repo_maint/state.json`` next to the ETags themselves.
     """
 
-    def __init__(self, http: HttpClientLike) -> None:
+    def __init__(
+        self,
+        http: Http,
+        token: str,
+        etag_bodies: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self._http = http
+        self._headers = default_headers(token)
+        self.etag_bodies = etag_bodies if etag_bodies is not None else {}
         self.rate_limit_remaining: int | None = None
         self.requests_made = 0
         self.not_modified_count = 0
@@ -123,44 +137,55 @@ class GitHubClient:
                 f"x-ratelimit-remaining {self.rate_limit_remaining} < floor {RATE_LIMIT_FLOOR}"
             )
 
-    def _record_rate_limit(self, response: HttpResponseLike) -> None:
-        remaining = response.headers.get("x-ratelimit-remaining")
+    def _record(self, headers: dict[str, str]) -> None:
+        self.requests_made += 1
+        remaining = headers.get("x-ratelimit-remaining")
         if remaining is not None:
             self.rate_limit_remaining = int(remaining)
 
     def _get(
         self, path: str, *, etag: str | None = None, params: dict[str, Any] | None = None
-    ) -> HttpResponseLike:
+    ) -> _Result:
         self._check_rate_limit()
-        headers = {"If-None-Match": etag} if etag else {}
-        response = self._http.request("GET", path, params=params, headers=headers)
-        self.requests_made += 1
-        self._record_rate_limit(response)
-        if response.status_code == 304:
-            self.not_modified_count += 1
-        return response
+        headers = dict(self._headers)
+        if etag:
+            headers["If-None-Match"] = etag
+        try:
+            response = self._http.request(
+                "GET", _url(path), params=params, headers=headers, ttl_seconds=0
+            )
+        except HttpError as e:
+            # agents_core.http raises on every non-2xx; 304/404/409 are answers, not failures.
+            self._record({})
+            if e.status == 304:
+                self.not_modified_count += 1
+                return _Result(304, {}, None)
+            if e.status in EMPTY_STATUSES:
+                return _Result(e.status, {}, None)
+            raise GitHubRequestError(f"GET {path} failed: {e}") from e
+        self._record(response.headers)
+        return _Result(response.status, response.headers, response.json())
+
+    def _conditional_etag(self, etag: str | None) -> str | None:
+        return etag if etag and etag in self.etag_bodies else None
 
     # -- reads ------------------------------------------------------------
 
     def get_json(
         self, path: str, *, etag: str | None = None, params: dict[str, Any] | None = None
     ) -> Page:
-        """A single conditional GET. ``not_modified=True`` on a 304."""
-        response = self._get(path, etag=etag, params=params)
-        if response.status_code == 304:
-            return Page(items=[], etag=etag, not_modified=True)
-        if response.status_code == 404:
+        """A single conditional GET. On a 304, ``items`` are the cached body."""
+        etag = self._conditional_etag(etag)
+        result = self._get(path, etag=etag, params=params)
+        if result.status == 304 and etag:
+            return Page(items=self.etag_bodies[etag], etag=etag, not_modified=True)
+        if result.status in EMPTY_STATUSES:
             return Page(items=[], etag=None, not_modified=False)
-        if response.status_code >= 400:
-            raise GitHubRequestError(f"GET {path} failed: {response.status_code} {response.text}")
-        body = response.json_body
-        if isinstance(body, list):
-            items = body
-        elif body is None:
-            items = []
-        else:
-            items = [body]
-        return Page(items=items, etag=response.headers.get("etag"), not_modified=False)
+        items = _as_items(result.body)
+        new_etag = result.headers.get("etag")
+        if new_etag:
+            self.etag_bodies[new_etag] = items
+        return Page(items=items, etag=new_etag, not_modified=False)
 
     def paginate(
         self, path: str, *, etag: str | None = None, params: dict[str, Any] | None = None
@@ -169,8 +194,9 @@ class GitHubClient:
 
         The conditional request is only made on the first page: a 304 there
         means the whole collection is unchanged, since these list endpoints
-        are polled sorted by ``updated``/``since``.
+        are polled sorted by ``updated``.
         """
+        etag = self._conditional_etag(etag)
         all_items: list[dict[str, Any]] = []
         page_params: dict[str, Any] = dict(params or {})
         page_params.setdefault("per_page", 100)
@@ -179,58 +205,61 @@ class GitHubClient:
         first_page_etag: str | None = None
         first = True
         while next_path:
-            response = self._get(
+            result = self._get(
                 next_path,
                 etag=etag if first else None,
                 params=page_params if first else None,
             )
-            if first and response.status_code == 304:
-                return Page(items=[], etag=etag, not_modified=True)
-            if response.status_code >= 400:
-                raise GitHubRequestError(
-                    f"GET {next_path} failed: {response.status_code} {response.text}"
-                )
-            body = response.json_body or []
-            if isinstance(body, list):
-                all_items.extend(body)
+            if first and result.status == 304 and etag:
+                return Page(items=self.etag_bodies[etag], etag=etag, not_modified=True)
+            if result.status in EMPTY_STATUSES:
+                if first:
+                    return Page(items=[], etag=None, not_modified=False)
+                break
+            if isinstance(result.body, list):
+                all_items.extend(result.body)
             if first:
-                first_page_etag = response.headers.get("etag")
-            next_path = _next_link(response.headers.get("link"))
+                first_page_etag = result.headers.get("etag")
+            next_path = _next_link(result.headers.get("link"))
             first = False
 
+        if first_page_etag:
+            self.etag_bodies[first_page_etag] = all_items
         return Page(items=all_items, etag=first_page_etag, not_modified=False)
 
     # -- writes: the ONLY two write operations this client exposes --------
 
-    def add_labels(
-        self, owner: str, repo: str, issue_number: int, labels: Iterable[str]
-    ) -> HttpResponseLike:
+    def add_labels(self, owner: str, repo: str, issue_number: int, labels: Iterable[str]) -> Any:
         """``POST /repos/{owner}/{repo}/issues/{issue_number}/labels`` (§8.2)."""
         self._check_rate_limit()
-        response = self._http.request(
-            "POST",
-            f"/repos/{owner}/{repo}/issues/{issue_number}/labels",
-            json={"labels": list(labels)},
-        )
-        self.requests_made += 1
-        self._record_rate_limit(response)
-        if response.status_code >= 400:
-            raise GitHubRequestError(f"add_labels failed: {response.status_code} {response.text}")
-        return response
+        try:
+            response = self._http.request(
+                "POST",
+                _url(f"/repos/{owner}/{repo}/issues/{issue_number}/labels"),
+                headers=self._headers,
+                json_body={"labels": list(labels)},
+                ttl_seconds=0,
+            )
+        except HttpError as e:
+            raise GitHubRequestError(f"add_labels failed: {e}") from e
+        self._record(response.headers)
+        return response.json()
 
-    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> HttpResponseLike:
+    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> Any:
         """``POST /repos/{owner}/{repo}/issues/{issue_number}/comments`` (§8.2)."""
         self._check_rate_limit()
-        response = self._http.request(
-            "POST",
-            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
-            json={"body": body},
-        )
-        self.requests_made += 1
-        self._record_rate_limit(response)
-        if response.status_code >= 400:
-            raise GitHubRequestError(f"add_comment failed: {response.status_code} {response.text}")
-        return response
+        try:
+            response = self._http.request(
+                "POST",
+                _url(f"/repos/{owner}/{repo}/issues/{issue_number}/comments"),
+                headers=self._headers,
+                json_body={"body": body},
+                ttl_seconds=0,
+            )
+        except HttpError as e:
+            raise GitHubRequestError(f"add_comment failed: {e}") from e
+        self._record(response.headers)
+        return response.json()
 
 
 def _next_link(link_header: str | None) -> str | None:

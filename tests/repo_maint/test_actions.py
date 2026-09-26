@@ -1,8 +1,8 @@
 """Tests for agents.repo_maint.actions (§8, §11).
 
-Every test that touches a "real" client uses ``FakeHttpClient`` built on
+Every test that touches a "real" client uses agents_core's ``Http`` over an
 ``httpx.MockTransport`` (tests/repo_maint/fakes.py) -- no live network call
-is ever made, per tonight's hard safety rule.
+is ever made.
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ from agents.repo_maint.actions import (
     plan_actions_for_issue,
 )
 from agents.repo_maint.config import RepoConfig
-from agents.repo_maint.gh import GitHubClient
 from agents.repo_maint.triage import TriageResult
 from agents.repo_maint.untriaged import TRIAGE_MARKER
-from tests.repo_maint.fakes import FakeHttpClient
+from tests.repo_maint.fakes import gh_client
 
 REPO = RepoConfig(full_name="you/repo", role="sandbox", allow_apply=True, token="repo_maint")
 
@@ -50,7 +49,7 @@ def recording_client(calls: list):
         calls.append((request.method, str(request.url), request.content))
         return httpx.Response(200, json={"id": 1}, headers={"x-ratelimit-remaining": "4999"})
 
-    return GitHubClient(http=FakeHttpClient(handler))
+    return gh_client(handler)
 
 
 # -- comment template + marker (§8.3) --------------------------------------------
@@ -281,7 +280,7 @@ def test_execute_actions_records_failure_without_raising():
             422, json={"message": "nope"}, headers={"x-ratelimit-remaining": "4999"}
         )
 
-    client = GitHubClient(http=FakeHttpClient(handler))
+    client = gh_client(handler)
     actions = [Action(
         repo=REPO.full_name, type="add_labels", target=1, detail=["bug"], status="planned"
     )]

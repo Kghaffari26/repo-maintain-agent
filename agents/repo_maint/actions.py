@@ -8,9 +8,9 @@ requires an explicit ``gate_passed=True`` computed by
 one; anything else is logged as ``planned``/``skipped`` with a reason,
 never silently dropped (§8.1).
 
-**Tonight's hard safety rule**: nothing in this session calls
-``execute_actions`` with a real ``GitHubClient`` and ``gate_passed=True``.
-Apply mode is built and tested entirely against mocks (see DECISIONS.md).
+No agent session has ever called ``execute_actions`` with a live
+``GitHubClient`` and ``gate_passed=True``: apply mode is built and tested
+entirely against mocks so far (see DECISIONS.md, STATUS.md).
 """
 
 from __future__ import annotations

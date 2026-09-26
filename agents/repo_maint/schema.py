@@ -1,81 +1,22 @@
 """Output schema: the site contract (SPEC_REPO_MAINT.md §6).
 
-The shared blocks here (``Model``, ``Timestamp``, ``RunMeta``, ``KeyStat``,
-``Source``, ``ModelUsage``/``TierUsage``) are **mirrors** of
-``agents_core.schema``, field-for-field, copied from a real read of that
-module in the agents-core repo (see DECISIONS.md/STATUS.md -- it isn't
-installable yet). They exist so this agent's output validates against the
-same shape the site expects *today*; once agents_core is wired in, these
-mirrors should be deleted and replaced with the real import, changing
-nothing about ``RepoMaintOutput`` itself.
+The shared blocks (``Model``, ``Timestamp``, ``RunMeta``, ``KeyStat``, ...) come
+from ``agents_core.schema``. ``agents_core.runner`` builds ``meta`` itself and
+validates ``{**body, "meta": meta}`` against ``RepoMaintOutput``; the §6 meta
+extensions (``github_requests``, ``github_304s``) ride in the body under
+``META_EXTRA_KEY`` and are folded into ``meta`` by a before-validator, so the
+published JSON keeps exactly the §6 shape.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, PlainSerializer
+from agents_core.schema import AgentOutput, KeyStat, Model, RunMeta, Timestamp
+from pydantic import Field, HttpUrl, model_validator
 
-RunStatus = Literal["ok", "stale", "failed"]
-GoodDirection = Literal["up", "down", "neutral"]
-StatFormat = Literal[
-    "currency_compact",
-    "currency",
-    "percent",
-    "percent_signed",
-    "pp_signed",
-    "count",
-    "count_signed",
-    "count_signed_thousands",
-    "decimal1",
-    "days",
-    "ratio",
-]
-
-
-def iso_z(dt: datetime) -> str:
-    return dt.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-Timestamp = Annotated[AwareDatetime, PlainSerializer(iso_z, return_type=str, when_used="json")]
-
-
-class Model(BaseModel):
-    """Base for published models: unknown fields are a validation error."""
-
-    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
-
-
-class Source(Model):
-    name: str
-    url: HttpUrl
-    retrieved_at: Timestamp
-
-
-class TierUsage(Model):
-    input_tokens: int = 0
-    output_tokens: int = 0
-
-
-class ModelUsage(Model):
-    fast: TierUsage = Field(default_factory=TierUsage)
-    smart: TierUsage = Field(default_factory=TierUsage)
-
-
-class RunMeta(Model):
-    """The shared `meta` block (mirrors agents_core.schema.RunMeta)."""
-
-    agent: str
-    schema_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
-    run_id: str
-    started_at: Timestamp
-    finished_at: Timestamp
-    status: RunStatus
-    data_changed: bool
-    cost_usd: float = Field(ge=0)
-    model_usage: ModelUsage
-    sources: list[Source]
+#: Body key that carries meta extensions past agents_core.runner's own meta block.
+META_EXTRA_KEY = "_meta_extra"
 
 
 class RepoMaintMeta(RunMeta):
@@ -83,15 +24,6 @@ class RepoMaintMeta(RunMeta):
 
     github_requests: int = Field(ge=0)
     github_304s: int = Field(ge=0)
-
-
-class KeyStat(Model):
-    label: str
-    value: float | None
-    format: StatFormat
-    delta: float | None = None
-    delta_format: StatFormat | None = None
-    good_direction: GoodDirection = "neutral"
 
 
 # -- §6 repo_maint-specific shapes ------------------------------------------------
@@ -213,7 +145,7 @@ class ActionEntry(Model):
     reason: str | None = None
 
 
-class RepoMaintOutput(Model):
+class RepoMaintOutput(AgentOutput):
     """The full `latest.json` contract for this agent (§6)."""
 
     meta: RepoMaintMeta
@@ -222,3 +154,13 @@ class RepoMaintOutput(Model):
     mode: Mode
     repos: list[RepoEntry]
     actions: list[ActionEntry]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_meta_extra(cls, data: Any) -> Any:
+        if isinstance(data, dict) and META_EXTRA_KEY in data:
+            data = dict(data)
+            extra = data.pop(META_EXTRA_KEY)
+            data["meta"] = {**dict(data.get("meta") or {}), **extra}
+        return data
+

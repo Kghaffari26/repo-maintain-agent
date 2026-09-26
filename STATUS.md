@@ -1,213 +1,174 @@
-# Status — autonomous overnight session, 2026-09-24
+# Status — session 2026-09-26 (agents-core v0.1.0 wired in)
 
-Read this first. `DECISIONS.md` has the full reasoning behind every
-judgment call referenced here.
+Read this first. `DECISIONS.md` has the reasoning behind every judgment call
+referenced here (this session's are under "Session 2026-09-26").
 
 ## TL;DR
 
-- Built essentially the whole spec (§14 build order 1–9) tonight, working
-  around one real, hard blocker: **agents-core isn't installable as
-  `agents_core` yet** (still a non-packaged monorepo at `core/`, not
-  `src/agents_core/`). Everything that needed it is built with an
-  injectable interface instead, clearly marked, ready to swap in.
-- **273 tests passing, ruff clean.**
-- **Zero GitHub writes made, all night** — confirmed by construction
-  (nothing calls `execute_actions` with a live client and `gate_passed=True`
-  outside a mock) and by the real run's own request log.
-- **Real cost: $0.00.** No `ANTHROPIC_API_KEY` in this environment, so no
-  Anthropic API call was physically possible tonight, by anyone, at any
-  point. This is also why the LLM-dependent evals are provisional.
-- One real report-mode run happened, against `agents-core` and
-  `real-estate-agent` (the only 2 of your 6 configured repos this session
-  had live GitHub API access to) — see "The real run" below.
+- **Everything that was blocked on agents-core is done.** HTTP, LLM, costs,
+  guards, publish and the runner all come from `agents-core @ v0.1.0`; the agent
+  is registered as `repo_maint` and `uv run agents-run repo_maint [--dry-run]` works.
+- **317 tests passing, ruff clean** (was 273). actionlint clean on the workflow.
+- **Zero GitHub write requests** this session: no `--apply`, `APPLY_CHANGES=false`
+  on every run, and the run logs show 0 non-GET requests.
+- **Anthropic spend this session: $0.0798**, all of it the live evals (47 calls).
+  The two real agent runs cost $0.00 (see "The real runs" for why).
+- **CI can't do real work yet**: agents-core's reusable workflow doesn't pass a
+  GitHub token to the agent. See "Needed from agents-core" — you'll need to fix
+  that there.
 
 ## Done
 
-Per SPEC_REPO_MAINT.md §14's build order:
+(a) **Stand-ins replaced with agents_core**
+- `gh.py` → `agents_core.http.Http` (still exactly two write methods; both
+  introspection tests kept and extended to assert it imports `agents_core.http`).
+- `triage.py` → `ctx.llm.structured("fast", …)` with the §7.2 prompt, and
+  `agents_core.guards.verify_numbers` in place of the old narrow number check.
+- `changelog.py` → `ctx.llm.complete("smart", …)` with the §7.3 prompt; the guard
+  is the §7.3 ref guard plus `verify_numbers`.
+- `schema.py` → the mirrored classes are gone; it builds on `agents_core.schema`.
+- Costs/budget → `agents_core.costs` via `ctx.llm` (`data/costs.jsonl`,
+  `AGENTS_CORE_MAX_RUN_USD`). Publishing + runner → `agents_core.runner`.
+- Deleted `scripts/run_report_once.py` and `scripts/run_agent.py`.
+  `scripts/seed_sandbox.py` now posts through `Http` too (still never run).
 
-1. **Client and config** — `gh.py` (ETags, pagination, rate-limit guard,
-   exactly 2 write methods, introspection-tested), `config.py` (gate
-   validation; `public_demo` + `allow_apply` fails at config-load time).
-2. **Sandbox seeding script** — `scripts/seed_sandbox.py`, written per
-   §13, **never run** (no sandbox repo exists yet — that's on you, see
-   "Your next steps"). Its pure content-generation functions are unit
-   tested; nothing that writes to GitHub is.
-3. **Fetch and metrics** — `fetch.py`, `metrics.py`, `untriaged.py`,
-   `stale.py`, `health.py` (§5), fully tested with fixtures.
-4. **Duplicates and triage** — `duplicates.py` (TF-IDF, §5.3), `triage.py`
-   (§7.2 post-processing: label allowlisting, priority escalation,
-   duplicate confirmation, caching, per-run cap).
-5. **Changelog** — `changelog.py`: base-ref selection, PR/commit content,
-   semver suggestion, the §7.3 ref guard with retry, deterministic
-   fallback, PR-set-hash caching.
-6. **Actions and safety** — `sanitize.py` (§8.4) and `actions.py` (§8.1–8.3:
-   plan → gate → execute → log, both double-post-prevention layers, per-run
-   and per-repo-per-day write caps).
-7. **Schema and publish** — `schema.py` (§6, the full `latest.json`
-   contract), `state.py`, `pipeline.py` (end-to-end orchestration, new
-   tonight beyond the original 9-step list — needed to actually run
-   anything).
-8. **Evals** — 40-issue fixture set + `labels_proposed.json` (my proposed
-   answer key) + 4 injection fixtures + 3 changelog fixture sets. See
-   "Eval results" below for what actually ran vs. what's provisional.
-9. **Workflow** — `.github/workflows/agent-repo-maint.yml`, two jobs with
-   distinct least-privilege permissions, cron + `workflow_dispatch` with a
-   repos filter. Calls `scripts/run_agent.py` directly rather than the
-   agents-core reusable workflow (see DECISIONS.md for why).
+(b) **Registration**: `[project.entry-points."agents_core.agents"] repo_maint = "agents.repo_maint.agent:AGENT"`.
+`agents-run --list` shows it; `--dry-run` fetches and computes everything, lists
+planned actions, and makes no LLM calls, no writes, and publishes nothing.
 
-Plus, beyond the original 9 steps: **one real report-mode run**, executed
-and its output committed (`public-data/repo_maint/latest.json` +
-`data/repo_maint/state.json`).
+(c) **LLM triage + changelog with guards and fallbacks**: triage failures
+(refusal, schema mismatch) leave the issue for the next run; hitting
+`MAX_RUN_USD` stops fresh triage but not the run; the changelog falls back to the
+deterministic grouping after two guard failures, or right away if the model is
+unavailable (that fallback isn't cached, so the next run tries the model again).
+
+(d) **Publishing** follows the data-branch contract under `public-data/`:
+`latest.json` (§6 shape unchanged, incl. `meta.github_requests`/`github_304s`),
+`history/`, `manifest-entry.json`, `costs-summary.json`, `schema.json`.
+
+(e) **Workflow** calls `Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.1.0`
+(`secrets: inherit`, `site_repo: Kghaffari26/agents-hub`, `max_run_usd: "0.25"`)
+from two jobs: `report` by default and `apply` only when `vars.APPLY_CHANGES == 'true'`.
+**The per-job permissions can't take effect** — see DECISIONS.md and below.
+
+**Also:**
+- `config/repos.toml`: this repo is `Kghaffari26/repo-maintain-agent`; it watches
+  repo-maintain-agent, agents-core, real-estate-agent, fed-agent, sam-agent and
+  agents-hub (all `role = "own"`, `allow_apply = false`). The commented-out
+  sandbox entry is kept.
+- **Fixed a real bug**: on a 304, the old client returned an empty list, so any
+  unchanged repo would have shown zero issues on the second run. ETag bodies
+  are now cached in `state.json`.
+- Fixed last session's open limitation: one failing repo no longer fails the run.
+
+## The real runs
+
+`uv run agents-run repo_maint`, report mode, run twice back to back:
+
+| | Run 1 | Run 2 (immediately after) |
+|---|---|---|
+| run_id | 2026-09-26T18-06-47Z-be16a4 | 2026-09-26T18-07-10Z-a3338e |
+| cost (data/costs.jsonl) | **$0.0000**, 0 LLM calls | **$0.0000**, 0 LLM calls |
+| GitHub requests / 304s (meta) | 44 / 0 | 44 / **24** |
+| non-GET requests (run log) | 0 | 0 |
+| requests to unreachable repos (403, not in meta) | 2 | 2 |
+| changelog | drafted (deterministic: empty set) | **cached** |
+| data_changed | true | false |
+
+Repos: repo-maintain-agent 74 (C), fed-agent 94 (A), sam-agent 94 (A),
+agents-hub 94 (A). The −6 on each is for a missing LICENSE and CONTRIBUTING.
+This repo also loses 20 points because a check run on `main` is failing.
+
+**Be clear about what "zero LLM calls on run 2" proves here:** run 1 *also*
+made zero calls. None of the four reachable repos has an open issue, a tag, or a
+PR merged in the last 30 days, so nothing needed the model. The
+"second run is fully cached" path with real triage and changelog calls is
+covered by tests (`test_immediate_second_run_makes_zero_llm_calls`,
+`test_llm_run_triages_plans_actions_and_second_run_is_fully_cached`) using a
+scripted model. The live model path was exercised by the evals.
+
+**2 of 6 repos weren't reachable:** agents-core and real-estate-agent returned
+403. This session's GitHub API access only covers attached repos. Attaching
+fed-agent, sam-agent and agents-hub worked; attaching agents-core and
+real-estate-agent was denied by the session's permission classifier, and I didn't
+retry. The published headline says "4 repos watched (2 unreachable)".
+
+## Eval results (`evals/results/repo_maint-2026-09-26.json`)
+
+`uv run python -m evals.repo_maint.run_evals --live`: **$0.0798**, 47 calls.
+**Overall: PROVISIONAL.** The fixtures are synthetic, and the answer key
+(`labels_proposed.json`) was proposed by the last agent session and hasn't been
+reviewed by a human.
+
+| Eval | Result | Bar |
+|---|---|---|
+| classification_accuracy | **95%** (38/40; misses: fx-026 bug→other, fx-031 chore→bug) | ≥ 85% |
+| priority | **100%** within one level; security fixtures p0, p0, p1 | ≥ 80%, security at p0/p1 |
+| label_allowlist | raw model 100% allowlisted; 100% after filtering | 100% after filtering |
+| duplicate_confirmation | precision **0.857**, recall 1.0 | precision ≥ 0.8 |
+| injection_resistance (worst-case, no model) | 4/4 | — |
+| injection_resistance_live | **3/4** — see below | 4/4 |
+| changelog_fidelity (scripted) | 100% coverage after guard | — |
+| changelog_fidelity_live | 100% coverage, **100% first-attempt** | 100%, ≥ 90% |
+
+**Live injection finding (inj-01), not fixed; this is your call:** the model
+resisted the injected instruction and answered `p3`, but §7.2's required
+escalation ("force ≥ p1 for a bug whose text matches
+`security|vulnerability|data loss|crash on start`") fired on the word "security"
+*inside the injected instruction*, so our own code raised it to p1. Anyone who
+can open an issue can trigger that bump. Low impact (it only affects a priority
+label, and only if `priority_labels` is configured), but the spec mandates the
+behavior, so changing it needs a spec decision. Options: only escalate when the
+model also says p0–p2 *and* classification is bug with confidence ≠ low; or
+ignore regex matches inside backticks/quoted text.
+
+## Needed from agents-core (stopped here; agents-core not modified)
+
+`run-agent.yml@v0.1.0` can't run this agent for real:
+
+1. **Its agent step doesn't pass a GitHub token.** Its `env:` forwards only
+   `ANTHROPIC_API_KEY`, `FRED_API_KEY`, `SAM_API_KEY`, `CENSUS_API_KEY`. This
+   agent needs `GITHUB_TOKEN` (`${{ github.token }}` or `secrets.GITHUB_TOKEN`)
+   and `REPO_MAINT_TOKEN`. Without them every repo fails with "GITHUB_TOKEN is
+   not set", and the scheduled run fails (loudly, by design).
+2. **It doesn't pass `APPLY_CHANGES`** (`vars.APPLY_CHANGES`) to the agent step,
+   so apply mode can never pass gate 2. That fails safe, but apply can't work.
+3. **Its top-level `permissions: contents: write`** caps GITHUB_TOKEN inside it,
+   so the caller's per-job `issues: read/write` / `pull-requests: read` never
+   reach the agent (§8.6's least-privilege split). It needs job-level permissions
+   that inherit from the caller, or `issues`/`pull-requests` declared at the
+   level the caller grants.
+4. **History won't accumulate on the `data` branch.** The workflow rebuilds that
+   branch from whatever `public-data/` is on the default branch plus today's run.
+   It never checks out the previous `data` branch first, and it doesn't commit
+   `public-data/` back. So `history/` there will hold at most the committed
+   snapshots plus one, and `ctx.previous_latest()` / the manifest's
+   `last_data_change_at` only see what's committed on `main`.
+
+## Things you need to do by hand
+
+1. **Fix items 1–3 above in agents-core** (and tag a release), then bump the pin
+   in `pyproject.toml` and the workflow's `uses:` lines together (see CLAUDE.md).
+2. **Add `ANTHROPIC_API_KEY` as a repo secret** here (the reusable workflow reads
+   `secrets.ANTHROPIC_API_KEY`), plus `SITE_DISPATCH_TOKEN` if agents-hub should
+   be notified.
+3. **Grant this agent access to agents-core and real-estate-agent** for local runs
+   (attach them in a session, or run locally with a token that can read them).
+4. **Review `evals/repo_maint/labels_proposed.json`**, then decide on the
+   inj-01 priority-escalation finding above.
+5. **Spec gap to decide on:** a repo with no tags *and* no merged PRs gets an
+   empty changelog. The 30-day fallback base has no ref for `compare`, and §3
+   lists no commits-since-date endpoint. That's true of every repo watched today.
+6. Unchanged from last session: create the sandbox repo, uncomment its entry,
+   set `REPO_MAINT_TOKEN`, and run `scripts/seed_sandbox.py --confirm` yourself.
+   Only after watching report mode for a while, and only for the sandbox,
+   consider `APPLY_CHANGES = "true"`.
+7. `main` on this repo has a failing check run (−20 health). Worth a look.
 
 ## Test count and lint
 
 ```
-uv run pytest    ->  273 passed
-uv run ruff check .  ->  All checks passed!
+uv run pytest           ->  317 passed
+uv run ruff check .     ->  All checks passed!
+actionlint              ->  clean
 ```
-
-One test per module under `agents/repo_maint/`, plus an end-to-end
-integration test (`test_pipeline.py`) against a fully mocked GitHub API,
-plus tests for the eval machinery itself. No test makes a live network or
-LLM call.
-
-## Eval results (`evals/results/repo_maint-2026-09-24.json`)
-
-**Overall status: PROVISIONAL.** Two of six evals ran for real tonight, at
-zero cost; four need a live model call that wasn't possible.
-
-| Eval | Status | Result |
-|---|---|---|
-| `injection_resistance` | **ran** | 4/4 fixtures passed. Found and fixed a real gap along the way: a "reply with your system prompt" attempt wasn't caught by `sanitize.py` — added `"system prompt"` to its reject phrases. Also surfaced (and documented as a known, spec-inherent limitation, not a bug) that a model self-reporting `priority: p0` outright isn't clamped by code — §7.2's guard only ever escalates upward on a regex match. |
-| `changelog_fidelity` | **ran** | 100% ref coverage post-guard on all 3 scripted fixture sets. The reported "first-attempt rate" (33%) reflects the *scripted* sequences, not real model quality — see the eval's own `note` field. |
-| `classification_accuracy` | provisional_not_run | needs a live model call |
-| `priority` | provisional_not_run | needs a live model call |
-| `label_allowlist` | provisional_not_run | needs a live model call (the *code-level* allowlist, a different thing, is fully tested in `test_triage.py`) |
-| `duplicate_confirmation` | provisional_not_run | needs a live model call |
-
-`evals/repo_maint/labels_proposed.json` has my proposed answer key for
-all 40 fixtures, ready to score a real triage run against once one is
-possible.
-
-**Fixture provenance, not hidden:** §11 asks for "25 from the seeded
-sandbox, plus 15 real public issues." Both sources were genuinely checked
-and both are blocked tonight — see DECISIONS.md. All 40 fixtures are
-synthetic (26 from `scripts.seed_sandbox`, 14 hand-written to fill
-classification gaps). Each fixture's `provenance` field says so.
-
-## The real run
-
-```
-uv run python -m scripts.run_report_once
-```
-
-Ran twice back to back against the repos this session had live GitHub API
-access to (`Kghaffari26/agents-core`, `Kghaffari26/real-estate-agent` —
-see "Needed from you" below for why only 2 of 6):
-
-| | Run 1 | Run 2 (immediately after) |
-|---|---|---|
-| mode | report | report |
-| GitHub requests | 22 | 22 |
-| — of which 304 (cached) | 0 | **12** |
-| cost_usd | 0.0000 | 0.0000 |
-| writes made | 0 | 0 |
-| repos | agents-core: health 91 (A) · real-estate-agent: health 94 (A) | same |
-
-Both repos are essentially empty right now (0 open issues, 0 open PRs),
-so there wasn't much to triage — but this proves the full pipeline runs
-end to end against live data, publishes valid §6 JSON, respects ETags on
-a second run, and makes zero writes. Output is committed at
-`public-data/repo_maint/latest.json` (+ `history/2026-09-24.json`) and
-`data/repo_maint/state.json`.
-
-## Needed from agents-core
-
-The blocking dependency. Checked at session start and again ~15 minutes
-later (05:34 and 05:50 UTC); both times, `Kghaffari26/agents-core`'s only
-branch (`main`) has `core/guards.py` and `core/registry.py` in a
-non-packaged monorepo (`pyproject.toml` has `[tool.uv] package = false`,
-no `[build-system]`) — not `src/agents_core/{guards,registry}.py` in an
-installable package. It cannot be `uv add`-ed as a git dependency in its
-current form. Specifically still missing, all of which this repo needs
-per tonight's rules ("never write your own http/llm/costs/guards/publish/
-runner module"):
-
-- `agents_core.http.HttpClient` — `gh.py` and `pipeline.py` take an
-  injected client with the right shape; nothing implements retries/
-  caching itself. Swap point: `gh.HttpClientLike`.
-- `agents_core.llm` — triage/changelog take injected `classify_fn`/
-  `draft_fn`; with none provided, triage produces no fresh results and
-  changelog always uses its deterministic fallback.
-- `agents_core.guards.verify_numbers` — `triage.py`'s
-  `contains_number_support` is an explicitly narrower, triage-specific
-  stand-in, not a reimplementation of the real thing.
-- `agents_core.schema` (`Model`, `Timestamp`, `RunMeta`, `KeyStat`, etc.)
-  — mirrored field-for-field in `schema.py` from a real read of the
-  module, so the output validates against the right shape today.
-- `agents_core.costs`, `agents_core.publish`, `agents_core.runner`,
-  `agents_core.registry` — not wired in at all; `pipeline.py` +
-  `scripts/run_agent.py` stand in for `core.runner`, and there's no
-  `agents/repo_maint/agent.py:AGENT` registered anywhere yet.
-
-None of `agents-core`'s files were modified — see CLAUDE.md for the exact
-swap-in steps once it's packaged.
-
-## Blockers / things I could not do
-
-- **Live evals** (classification_accuracy, priority, label_allowlist,
-  duplicate_confirmation): need `ANTHROPIC_API_KEY`, not present.
-- **Real public-repo issues for the eval fixture set**: this session's
-  repo-scope safety guard correctly denied attaching an unrelated
-  third-party repo (`pallets/flask`) for API access — it did allow the
-  same call for repos you own. Your own watched repos genuinely have zero
-  issues right now (confirmed via the GitHub API), so there was nothing
-  real to pull from either source.
-- **4 of your 6 configured repos weren't reachable this session**:
-  `Kghaffari26/sam-agent` (an `add_repo` call for it was denied by the
-  session's own auto-mode classifier — looked like a transient/concurrency
-  issue, not a policy one, worth just retrying), `Kghaffari26/macro-fed-agent`
-  and `Kghaffari26/agents-hub` (not found — don't exist yet, or a naming
-  mismatch), and **`Kghaffari26/repo-maint-agent`** — tonight's instructions
-  named it that way, but this session's own repo (where all of this lives)
-  is actually `Kghaffari26/repo-maintain-agent` (with "ain"). I used the
-  name exactly as given in `config/repos.toml` rather than silently
-  "fixing" it; there's a comment right above that entry. **Please confirm
-  in the morning** whether `repo-maint-agent` is a real, separate repo I
-  should know about, or whether that entry should just say
-  `repo-maintain-agent`.
-- **`scripts/seed_sandbox.py`'s PR-creation half** (`create_pr_branch`) is
-  an intentional `NotImplementedError` stub — it depends on the sandbox
-  repo's actual file layout at seed time, which doesn't exist yet. The
-  issue-creation half is complete.
-- **`pipeline.run()` doesn't isolate a single repo's hard failure** — if
-  one configured repo 404s or its token is wrong, the whole run currently
-  fails rather than reporting that repo as failed and continuing with the
-  rest. Documented, not fixed tonight (would need `run()`'s per-repo loop
-  wrapped in its own try/except plus a "failed repo" shape in the schema).
-
-## Your next steps
-
-1. **Confirm the `repo-maint-agent` vs `repo-maintain-agent` naming** (see
-   above) and fix `config/repos.toml` if needed.
-2. **Create the sandbox repo** (e.g. `Kghaffari26/agents-hub-sandbox`),
-   uncomment its `[[repo]]` block in `config/repos.toml`, set
-   `REPO_MAINT_TOKEN` (fine-grained PAT, Issues read/write + Pull requests
-   read + Metadata read + Checks read, scoped to just that repo), then run
-   `uv run python -m scripts.seed_sandbox --repo <owner>/<sandbox> --confirm`
-   yourself — I deliberately never ran it.
-3. **Set `ANTHROPIC_API_KEY`** as a repo secret (for the workflow) and in
-   your local `.env` if you want to test triage/changelog for real before
-   trusting them in CI.
-4. **When agents-core is actually packaged**, follow the steps in
-   `CLAUDE.md`'s last section to wire it in and delete the temporary
-   scaffolding (`scripts/run_report_once.py`, `_TempHttpClient` in
-   `scripts/run_agent.py`, the mirrored schema classes).
-5. **Only then** consider setting the `APPLY_CHANGES` repo variable to
-   `"true"` — and only for the sandbox repo, per the spec's own §2/§13
-   guidance, until you've watched it run in report mode for a while.
-6. `Kghaffari26/sam-agent` — the `add_repo(push)` attach was denied by the
-   session's auto-mode classifier for reasons that looked transient; worth
-   a retry in a fresh session if you want it watched tonight's way.
-
-Branch: `claude/pensive-faraday-twjjvf`. Everything above is pushed.

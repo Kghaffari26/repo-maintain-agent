@@ -4,19 +4,25 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from agents_core.llm import LLMError
+
 from agents.repo_maint.changelog import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
     BaseRef,
     ChangelogItem,
     build_changelog,
     check_refs,
     deterministic_markdown,
     draft_changelog,
+    make_draft_fn,
     pr_set_hash,
     select_base,
     select_commits,
     select_pull_requests,
     suggest_version,
 )
+from tests.repo_maint.fakes import fake_llm
 
 NOW = datetime(2026, 9, 24, tzinfo=UTC)
 
@@ -272,6 +278,7 @@ def test_build_changelog_uses_cache_when_hash_and_base_unchanged():
     cache = {
         "base_ref": "v1.0.0",
         "pr_set_hash": pr_set_hash(items),
+        "prompt_version": PROMPT_VERSION,
         "markdown": "cached markdown",
         "narrative_source": "llm",
     }
@@ -291,3 +298,113 @@ def test_build_changelog_ignores_cache_when_hash_changed():
     )
     assert result.cached is False
     assert "### Fixed" in result.markdown
+
+
+def test_build_changelog_ignores_cache_from_an_older_prompt_version():
+    base = BaseRef(ref="v1.0.0", date=NOW, source="release", is_semver=True)
+    items = [ChangelogItem(ref="#1", title="A", merged_at=NOW)]
+    cache = {"base_ref": "v1.0.0", "pr_set_hash": pr_set_hash(items), "markdown": "old"}
+    result = build_changelog(
+        base=base, items=items, content_source="pull_requests", version_heading="## X", cache=cache
+    )
+    assert result.cached is False
+
+
+# -- number guard on the draft ------------------------------------------------------
+
+
+def test_check_refs_flags_numbers_not_in_the_input():
+    items = [ChangelogItem(ref="#1", title="Speed up search")]
+    result = check_refs("## X\n- Speed up search by 40% (#1)\n", items)
+    assert result.ok is False
+    assert result.unsupported == ["40%"]
+
+
+def test_check_refs_accepts_numbers_from_titles_and_short_shas():
+    items = [
+        ChangelogItem(ref="#12", title="Cap uploads at 50 MB"),
+        ChangelogItem(ref="a1b2c3d", title="fix: retry 3 times"),
+    ]
+    markdown = "## [1.2.0] - Unreleased\n- Cap uploads at 50 MB (#12)\n- Retry 3 times (a1b2c3d)\n"
+    assert check_refs(markdown, items).ok is True
+
+
+# -- the model call through agents_core.llm (§7.3) ------------------------------------
+
+
+def test_make_draft_fn_uses_smart_tier_and_the_7_3_prompt(tmp_path):
+    llm, client = fake_llm(["## X\n### Added\n- Add A (#1)\n"], tmp_path)
+    items = [ChangelogItem(ref="#1", title="Add A", labels=["enhancement"])]
+
+    markdown, source = draft_changelog(items, "## X", draft_fn=make_draft_fn(llm))
+
+    assert source == "llm"
+    call = client.calls[0]
+    assert call["model"] == "claude-sonnet-5"  # agents_core's smart tier
+    assert call["system"][0]["text"] == SYSTEM_PROMPT
+    assert "<<<ITEMS>>>" in call["messages"][0]["content"]
+
+
+def test_retry_prompt_lists_missing_and_extra_refs(tmp_path):
+    llm, client = fake_llm(["## X\n- B (#99)\n", "## X\n- A (#1)\n"], tmp_path)
+    items = [ChangelogItem(ref="#1", title="A")]
+
+    markdown, source = draft_changelog(items, "## X", draft_fn=make_draft_fn(llm))
+
+    assert source == "llm"
+    retry_prompt = client.calls[1]["messages"][0]["content"]
+    assert "missing refs" in retry_prompt and "#1" in retry_prompt
+    assert "not in the input" in retry_prompt and "#99" in retry_prompt
+
+
+def test_no_items_means_no_model_call(tmp_path):
+    llm, client = fake_llm([], tmp_path)
+    markdown, source = draft_changelog([], "## Unreleased", draft_fn=make_draft_fn(llm))
+    assert source == "deterministic"
+    assert client.calls == []
+
+
+def test_model_failure_falls_back_without_caching_the_fallback(tmp_path):
+    llm, _client = fake_llm([LLMError("refused")], tmp_path)
+    base = BaseRef(ref="v1.0.0", date=NOW, source="release", is_semver=True)
+    items = [ChangelogItem(ref="#1", title="fix: A", merged_at=NOW)]
+
+    result = build_changelog(
+        base=base,
+        items=items,
+        content_source="pull_requests",
+        version_heading="## X",
+        cache=None,
+        draft_fn=make_draft_fn(llm),
+    )
+
+    assert result.narrative_source == "deterministic"
+    assert "(#1)" in result.markdown
+    assert result.cacheable is False
+
+
+def test_guard_failing_twice_is_cached_as_the_final_draft(tmp_path):
+    llm, _client = fake_llm(["## X\n- nope\n", "## X\n- still nope\n"], tmp_path)
+    base = BaseRef(ref="v1.0.0", date=NOW, source="release", is_semver=True)
+    items = [ChangelogItem(ref="#1", title="fix: A", merged_at=NOW)]
+
+    result = build_changelog(
+        base=base,
+        items=items,
+        content_source="pull_requests",
+        version_heading="## X",
+        cache=None,
+        draft_fn=make_draft_fn(llm),
+    )
+
+    assert result.narrative_source == "deterministic"
+    assert result.cacheable is True
+
+
+def test_dry_run_draft_is_not_cacheable():
+    base = BaseRef(ref="v1.0.0", date=NOW, source="release", is_semver=True)
+    items = [ChangelogItem(ref="#1", title="fix: A", merged_at=NOW)]
+    result = build_changelog(
+        base=base, items=items, content_source="pull_requests", version_heading="## X", cache=None
+    )
+    assert result.cacheable is False

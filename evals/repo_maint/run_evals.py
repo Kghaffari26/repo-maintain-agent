@@ -1,35 +1,39 @@
 """Runs the §11 repo_maint evals and writes results to evals/results/.
 
-Two evals run for real tonight, at zero cost and with no live model:
+    uv run python -m evals.repo_maint.run_evals           # free evals only
+    uv run python -m evals.repo_maint.run_evals --live    # + live-model evals (costs ~$0.15)
+
+Always run (no model, no cost):
   - injection_resistance: feeds a *worst-case, fully-compliant* raw model
     output (as if the model had done exactly what the injected text asked)
-    through our own postprocess()/sanitize() code and checks that the
-    disallowed parts never survive. This is a stronger test of the code's
-    defenses than testing against the real, well-behaved model would be.
-  - changelog_fidelity: scripts draft_fn response sequences and checks the
-    §7.3 guard's ref-coverage and fallback behavior for real. The reported
-    "first-attempt rate" reflects the *scripted* sequences, not real model
-    quality -- see changelog_fixtures.py's docstring.
+    through our own postprocess()/sanitize() and checks the disallowed parts
+    never survive -- a test of the code's defenses independent of the model.
+  - changelog_fidelity: scripted draft sequences exercising the §7.3 guard,
+    retry and fallback mechanics (not model quality).
 
-Three evals are marked PROVISIONAL: classification_accuracy, priority, and
-duplicate_confirmation all require an actual model call, and there's no
-ANTHROPIC_API_KEY in this session (see DECISIONS.md/STATUS.md). My
-proposed answer key for them is in labels_proposed.json, ready to score
-a real run against once one is wired in. label_allowlist is reported as
-PROVISIONAL too, for the same reason (the "raw model rate" it wants can't
-be measured without real raw output) -- note this is separate from, and a
-different property than, the injection-resistance eval's allowlist check.
+With ``--live`` (through ``agents_core.llm``; spend capped at
+``live_evals.MAX_EVAL_USD`` and logged to data/costs.jsonl as agent
+``repo_maint_evals``): classification_accuracy, priority, label_allowlist,
+duplicate_confirmation, plus live variants of the two evals above.
+
+``overall_status`` stays PROVISIONAL either way: the answer key
+(labels_proposed.json) was proposed by an agent session and hasn't been
+reviewed by a human, and the fixtures are synthetic (see DECISIONS.md).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agents_core import settings
+
 from agents.repo_maint.changelog import check_refs, draft_changelog
 from agents.repo_maint.sanitize import sanitize_first_response
 from agents.repo_maint.triage import postprocess
+from evals.repo_maint import live_evals
 from evals.repo_maint.changelog_fixtures import CHANGELOG_FIXTURES, make_draft_fn
 from evals.repo_maint.injection_fixtures import INJECTION_FIXTURES
 
@@ -134,10 +138,9 @@ def run_changelog_fidelity() -> dict:
     return {
         "status": "ran",
         "note": (
-            "Scripted draft_fn response sequences, not live model output (no "
-            "ANTHROPIC_API_KEY this session) -- this validates the guard/retry/"
-            "fallback mechanics, not real model quality. Read first_attempt_rate "
-            "accordingly; it is not comparable to the >=90% live-model pass bar."
+            "Scripted draft_fn response sequences, not live model output -- this "
+            "validates the guard/retry/fallback mechanics, not real model quality. "
+            "See changelog_fidelity_live for the real model's first-attempt rate."
         ),
         "pass_criterion": (
             "100% ref coverage with no invented refs after the guard, on all 3 fixture sets"
@@ -154,41 +157,77 @@ def provisional(name: str, criterion: str) -> dict:
         answer_key = str(LABELS_PROPOSED_PATH.relative_to(Path.cwd()))
     return {
         "status": "provisional_not_run",
-        "reason": (
-            "requires a live LLM call; no ANTHROPIC_API_KEY in this session "
-            "(see DECISIONS.md/STATUS.md)"
-        ),
+        "reason": "requires a live model call; run with --live",
         "pass_criterion": criterion,
         "answer_key": answer_key,
     }
 
 
-def main() -> None:
+def run_live(fixtures: list[dict]) -> dict:
+    """The model-dependent evals, through the agent's own agents_core.llm path."""
+    answer_key = json.loads(LABELS_PROPOSED_PATH.read_text())["entries"]
+    llm = live_evals.eval_llm()
+    raw_outputs, results = live_evals.run_triage_fixtures(llm, fixtures)
+    security_ids = {f["id"] for f in fixtures if f["kind"] == "bug_security"}
+    evals = {
+        "classification_accuracy": live_evals.score_classification(results, answer_key),
+        "priority": live_evals.score_priority(results, answer_key, security_ids),
+        "label_allowlist": live_evals.score_label_allowlist(
+            raw_outputs, results, live_evals.EVAL_LABELS
+        ),
+        "duplicate_confirmation": live_evals.score_duplicates(raw_outputs, fixtures, answer_key),
+        "injection_resistance_live": live_evals.run_live_injection(llm),
+        "changelog_fidelity_live": live_evals.run_live_changelog(llm),
+    }
+    for result in evals.values():
+        result.setdefault("status", "ran_live")
+    evals["_cost"] = {
+        "usd": round(llm.tracker.total_usd, 6),
+        "calls": llm.tracker.calls,
+        "run_id": llm.tracker.run_id,
+        "cap_usd": llm.tracker.max_usd,
+    }
+    return evals
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true", help="also run the live-model evals")
+    args = parser.parse_args(argv)
+    settings.load_dotenv()
+
     fixtures = json.loads(FIXTURES_PATH.read_text()) if FIXTURES_PATH.exists() else []
+
+    evals: dict = {
+        "classification_accuracy": provisional("classification_accuracy", ">= 85% exact match"),
+        "priority": provisional(
+            "priority",
+            ">= 80% within one level, 100% of labeled security/data-loss issues at p0/p1",
+        ),
+        "label_allowlist": provisional(
+            "label_allowlist",
+            "100% of suggested labels exist after filtering; raw model rate reported",
+        ),
+        "duplicate_confirmation": provisional(
+            "duplicate_confirmation", "precision >= 0.8 on candidate pairs"
+        ),
+        "injection_resistance": run_injection_resistance(),
+        "changelog_fidelity": run_changelog_fidelity(),
+    }
+    if args.live:
+        evals.update(run_live(fixtures))
 
     results = {
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "agent": "repo_maint",
         "overall_status": "PROVISIONAL",
+        "overall_status_reason": (
+            "answer key (labels_proposed.json) is agent-proposed and not yet human-reviewed; "
+            "fixtures are synthetic"
+        ),
+        "live": args.live,
         "fixture_count": len(fixtures),
-        "evals": {
-            "classification_accuracy": provisional(
-                "classification_accuracy", ">= 85% exact match"
-            ),
-            "priority": provisional(
-                "priority",
-                ">= 80% within one level, 100% of labeled security/data-loss issues at p0/p1",
-            ),
-            "label_allowlist": provisional(
-                "label_allowlist",
-                "100% of suggested labels exist after filtering; raw model rate reported",
-            ),
-            "duplicate_confirmation": provisional(
-                "duplicate_confirmation", "precision >= 0.8 on candidate pairs"
-            ),
-            "injection_resistance": run_injection_resistance(),
-            "changelog_fidelity": run_changelog_fidelity(),
-        },
+        "evals": evals,
     }
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

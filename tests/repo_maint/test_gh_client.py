@@ -9,11 +9,11 @@ import httpx
 import pytest
 
 from agents.repo_maint import gh
-from tests.repo_maint.fakes import FakeHttpClient
+from tests.repo_maint.fakes import gh_client
 
 
-def _client(handler) -> gh.GitHubClient:
-    return gh.GitHubClient(http=FakeHttpClient(handler))
+def _client(handler, **kwargs) -> gh.GitHubClient:
+    return gh_client(handler, **kwargs)
 
 
 # -- pagination -----------------------------------------------------------
@@ -64,28 +64,66 @@ def test_paginate_stops_when_no_next_link():
 # -- conditional requests (ETags) -----------------------------------------
 
 
-def test_get_json_returns_not_modified_on_304():
+def test_get_json_returns_cached_body_on_304():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("if-none-match") == 'W/"cached"'
         return httpx.Response(304, headers={"x-ratelimit-remaining": "4999"})
 
-    client = _client(handler)
+    client = _client(handler, etag_bodies={'W/"cached"': [{"full_name": "o/r"}]})
     page = client.get_json("/repos/o/r", etag='W/"cached"')
 
     assert page.not_modified is True
-    assert page.items == []
+    assert page.items == [{"full_name": "o/r"}]
     assert client.not_modified_count == 1
 
 
-def test_paginate_returns_not_modified_on_304_first_page():
+def test_paginate_returns_cached_body_on_304_first_page():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(304, headers={"x-ratelimit-remaining": "4999"})
 
-    client = _client(handler)
+    client = _client(handler, etag_bodies={'W/"cached"': [{"number": 7}]})
     page = client.paginate("/repos/o/r/issues", etag='W/"cached"')
 
     assert page.not_modified is True
-    assert page.items == []
+    assert page.items == [{"number": 7}]
+
+
+def test_no_conditional_request_without_a_cached_body():
+    """An ETag whose body isn't known would turn a 304 into an empty list, so
+    the client sends an unconditional request instead."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("if-none-match"))
+        return httpx.Response(200, json=[{"number": 1}], headers={"etag": 'W/"new"'})
+
+    client = _client(handler)
+    page = client.paginate("/repos/o/r/issues", etag='W/"orphan"')
+
+    assert seen == [None]
+    assert page.items == [{"number": 1}]
+
+
+def test_fresh_responses_are_remembered_by_etag():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"number": 1}], headers={"etag": 'W/"e1"'})
+
+    client = _client(handler)
+    client.paginate("/repos/o/r/issues")
+    assert client.etag_bodies == {'W/"e1"': [{"number": 1}]}
+
+
+def test_requests_carry_github_headers_and_bypass_the_http_cache():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(200, json={})
+
+    _client(handler).get_json("/repos/o/r")
+    assert seen["authorization"] == "Bearer test-token"
+    assert seen["accept"] == gh.GITHUB_ACCEPT
+    assert seen["x-github-api-version"] == gh.GITHUB_API_VERSION
 
 
 def test_get_json_returns_fresh_etag_on_200():
@@ -115,6 +153,24 @@ def test_get_json_returns_empty_on_404():
 
     assert page.items == []
     assert page.not_modified is False
+
+
+def test_get_json_returns_empty_on_409_empty_repository():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"message": "Git Repository is empty."})
+
+    page = _client(handler).get_json("/repos/o/r/commits/main/check-runs")
+    assert page.items == []
+
+
+def test_reads_raise_on_other_error_statuses():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "Forbidden"})
+
+    with pytest.raises(gh.GitHubRequestError):
+        _client(handler).get_json("/repos/o/r")
+    with pytest.raises(gh.GitHubRequestError):
+        _client(handler).paginate("/repos/o/r/issues")
 
 
 # -- rate-limit guard -------------------------------------------------------
@@ -267,10 +323,12 @@ def test_github_client_has_no_other_public_write_looking_methods():
 
 
 def test_gh_module_does_not_implement_its_own_networking():
-    """Hard rule for tonight: gh.py must not implement retries/backoff/caching
-    itself -- that belongs to agents_core.http. It should only ever call
-    ``self._http.request(...)`` on the injected client."""
+    """gh.py must not implement retries/backoff/caching itself -- that belongs to
+    agents_core.http. It only ever calls ``self._http.request(...)`` on the
+    injected ``agents_core.http.Http``."""
     source = inspect.getsource(gh)
+    assert "from agents_core.http import Http" in source
     assert "import httpx" not in source
     assert "httpx.Client" not in source
     assert "time.sleep" not in source
+    assert "urllib" not in source
