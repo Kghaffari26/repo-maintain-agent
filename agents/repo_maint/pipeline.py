@@ -619,7 +619,8 @@ def _key_stat(
     label: str, value: float, direction: str, previous: dict[str, float] | None
 ) -> schema.KeyStat:
     """A §6 key stat. ``delta`` is the change since the previous published run's stat
-    of the same label (None on a first run); ``delta_format`` is always a standard
+    of the same label (None on a first run, or when the set of repos watched changed,
+    since the totals then aren't comparable); ``delta_format`` is always a standard
     agents-core format."""
     prior = (previous or {}).get(label)
     return schema.KeyStat(
@@ -632,15 +633,26 @@ def _key_stat(
     )
 
 
-def previous_key_stats(previous_latest: dict[str, Any] | None) -> dict[str, float] | None:
-    """``{label: value}`` from the previous ``latest.json``'s key stats, if any."""
+@dataclass
+class PreviousStats:
+    """The previous published run's key stats, and which repos they covered."""
+
+    stats: dict[str, float]
+    repos: frozenset[str]
+
+
+def previous_key_stats(previous_latest: dict[str, Any] | None) -> PreviousStats | None:
+    """``{label: value}`` and the repo set from the previous ``latest.json``, if any."""
     if not previous_latest:
         return None
     stats = {}
     for stat in previous_latest.get("key_stats") or []:
         if isinstance(stat, dict) and isinstance(stat.get("value"), int | float):
             stats[str(stat.get("label"))] = float(stat["value"])
-    return stats
+    repos = frozenset(
+        str(r.get("full_name")) for r in previous_latest.get("repos") or [] if isinstance(r, dict)
+    )
+    return PreviousStats(stats=stats, repos=repos)
 
 
 def build_body(
@@ -648,7 +660,7 @@ def build_body(
     all_actions: list[schema.ActionEntry],
     *,
     configured: int,
-    previous_stats: dict[str, float] | None = None,
+    previous_stats: PreviousStats | None = None,
 ) -> dict[str, Any]:
     """Every top-level §6 field except ``meta`` (agents_core.runner adds that; the
     §6 meta extensions go in ``AgentResult.meta_fields``, see ``RunResult``)."""
@@ -661,6 +673,10 @@ def build_body(
 
     watched = len(repo_entries)
     unreachable = configured - watched
+    comparable = previous_stats is not None and previous_stats.repos == frozenset(
+        e.full_name for e in repo_entries
+    )
+    prior = previous_stats.stats if comparable and previous_stats is not None else None
     headline = f"{watched} repo{'s' if watched != 1 else ''} watched"
     if unreachable:
         headline += f" ({unreachable} unreachable)"
@@ -670,10 +686,10 @@ def build_body(
         f"{total_stale} stale PR{'s' if total_stale != 1 else ''}."
     )
 
-    key_stats = [_key_stat("Untriaged issues", total_untriaged, "down", previous_stats)]
+    key_stats = [_key_stat("Untriaged issues", total_untriaged, "down", prior)]
     if avg_health is not None:
-        key_stats.append(_key_stat("Avg health", avg_health, "up", previous_stats))
-    key_stats.append(_key_stat("Stale PRs", total_stale, "down", previous_stats))
+        key_stats.append(_key_stat("Avg health", avg_health, "up", prior))
+    key_stats.append(_key_stat("Stale PRs", total_stale, "down", prior))
 
     return {
         "headline": headline,
@@ -739,7 +755,7 @@ def run(
     classify_factory: ClassifyFactory | None = None,
     draft_fn: changelog_mod.DraftFn | None = None,
     draft_model: str | None = None,
-    previous_stats: dict[str, float] | None = None,
+    previous_stats: PreviousStats | None = None,
     fix_ctx: fix_mod.FixContext | None = None,
 ) -> RunResult:
     """Runs every configured repo. Mutates ``state`` in place (caller saves it)."""
@@ -774,7 +790,7 @@ def finish_all(
     classify_factory: ClassifyFactory | None,
     draft_fn: changelog_mod.DraftFn | None,
     draft_model: str | None,
-    previous_stats: dict[str, float] | None = None,
+    previous_stats: PreviousStats | None = None,
     fix_ctx: fix_mod.FixContext | None = None,
 ) -> RunResult:
     """Stage 3 over every computed repo, then the §6 body."""

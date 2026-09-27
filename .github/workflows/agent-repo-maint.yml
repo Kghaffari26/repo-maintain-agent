@@ -21,6 +21,10 @@ on:
         description: "Comma-separated owner/name list to run against (optional; default: every repo in config/repos.toml)"
         required: false
         type: string
+      approve_fix:
+        description: "Fix proposal id(s) to open as DRAFT PRs, comma-separated (apply mode only; spec §6.1)"
+        required: false
+        type: string
 
 concurrency:
   group: repo-maint-${{ github.repository }}
@@ -64,5 +68,10 @@ jobs:
       # (allow_apply, role own/sandbox, a write token) are checked per repo in code;
       # fix-proposal PRs additionally need allow_fix_prs = true (§6.1).
       apply_changes: true
-      extra_args: --apply ${{ inputs.repos && format('--repos {0}', inputs.repos) || '' }}
+      # A human approving fix proposals by id (--approve-fix) is what lets a draft PR
+      # be opened; the agent rejects anything that isn't a 12-hex-digit id.
+      extra_args: >-
+        --apply
+        ${{ inputs.repos && format('--repos {0}', inputs.repos) || '' }}
+        ${{ inputs.approve_fix && format('--approve-fix {0}', inputs.approve_fix) || '' }}
     secrets: inherit

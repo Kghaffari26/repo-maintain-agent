@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "model": "claude-sonnet-5",
+  "responses": [
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 1
+      },
+      "content": [
+        {
+          "id": "toolu_019JrAwn3ruKQD6hJD7ogGRf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "query": "not an amount"
+          },
+          "name": "search_code",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 50,
+        "cache_creation_input_tokens": 360,
+        "cache_read_input_tokens": 1578
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 3
+      },
+      "content": [
+        {
+          "id": "toolu_01Qg47VmHPXfXAjka4xNUktJ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "path": "ledgerlite/money.py"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 56,
+        "cache_creation_input_tokens": 120,
+        "cache_read_input_tokens": 1938
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 5
+      },
+      "content": [
+        {
+          "id": "toolu_01JGVRMXxR9efPdjZkBqiCT1",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "diff": "--- a/ledgerlite/money.py\n+++ b/ledgerlite/money.py\n@@ -10,6 +10,7 @@ def parse_amount(text: str) -> Decimal:\n     \"\"\"Parse an amount like \"12.50\", \"-3\", \"$4.99\" or \"(7.25)\" (a debit).\"\"\"\n     cleaned = text.strip().replace(\"$\", \"\")\n+    cleaned = cleaned.replace(\",\", \"\")\n     negative = cleaned.startswith(\"(\") and cleaned.endswith(\")\")\n     if negative:\n         cleaned = cleaned[1:-1]\n",
+            "rationale": "parse_amount did not strip thousands separators before passing the string to Decimal, causing InvalidOperation for amounts like \"1,234.50\". Stripping commas before parsing fixes this while still supporting plain amounts."
+          },
+          "name": "propose_patch",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 338,
+        "cache_creation_input_tokens": 394,
+        "cache_read_input_tokens": 2058
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 7
+      },
+      "content": [
+        {
+          "id": "toolu_01EB6ycwbbd18FUtBMWnM7zR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "outcome": "patch_proposed",
+            "summary": "parse_amount() failed on amounts with thousands separators (e.g. \"1,234.50\") because commas weren't stripped before Decimal parsing; fixed by removing commas from the cleaned string first."
+          },
+          "name": "finish",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 139,
+        "cache_creation_input_tokens": 442,
+        "cache_read_input_tokens": 2452
+      }
+    }
+  ]
+}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import itertools
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,9 +28,11 @@ def sleepless(*_args, **_kwargs) -> None:
 
 
 def mock_http(handler, cache_dir: Path | None = None) -> Http:
-    """A real agents_core Http whose network is ``handler`` (httpx.MockTransport)."""
+    """A real agents_core Http whose network is ``handler`` (httpx.MockTransport).
+    Each one gets a fresh cache dir, which is also where Http keeps per-host daily
+    request counts, so budgets never carry over between tests."""
     return Http(
-        cache_dir=cache_dir or Path("/nonexistent-http-cache"),
+        cache_dir=cache_dir or Path(tempfile.mkdtemp(prefix="repo-maint-http-")),
         transport=httpx.MockTransport(handler),
         sleep=sleepless,
         max_attempts=1,

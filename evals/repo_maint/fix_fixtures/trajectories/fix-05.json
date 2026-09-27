@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "model": "claude-sonnet-5",
+  "responses": [
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 1
+      },
+      "content": [
+        {
+          "id": "toolu_01TjjkusTgQztu1tGx5g78CR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "query": "def slugify"
+          },
+          "name": "search_code",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 50,
+        "cache_creation_input_tokens": 322,
+        "cache_read_input_tokens": 1578
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 3
+      },
+      "content": [
+        {
+          "id": "toolu_01C6Qt7MUFNg6iRo49xjAfXb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "path": "ledgerlite/text.py"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 56,
+        "cache_creation_input_tokens": 111,
+        "cache_read_input_tokens": 1900
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 5
+      },
+      "content": [
+        {
+          "id": "toolu_01AMNByVQJdK9yC5wWLkFaeE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "diff": "--- a/ledgerlite/text.py\n+++ b/ledgerlite/text.py\n@@ -9,5 +9,5 @@ def slugify(name: str) -> str:\n     \"\"\"\"Eating Out\" -> \"eating-out\", for export file names.\"\"\"\n     lowered = name.strip().lower()\n     cleaned = re.sub(r\"[^a-z0-9 ]\", \"\", lowered)\n-    return cleaned.replace(\" \", \"-\")\n+    return re.sub(r\" +\", \"-\", cleaned.strip())\n",
+            "rationale": "Multiple spaces or punctuation collapsed to single spaces still produced consecutive spaces, which then became consecutive hyphens. Using regex to collapse one-or-more spaces into a single hyphen fixes double-hyphen output."
+          },
+          "name": "propose_patch",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 322,
+        "cache_creation_input_tokens": 221,
+        "cache_read_input_tokens": 2011
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 7
+      },
+      "content": [
+        {
+          "id": "toolu_01T7HZD4BrDYzDqTc4Ryatyz",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "outcome": "patch_proposed",
+            "summary": "slugify() replaced spaces with hyphens one-for-one, so multiple consecutive spaces (from punctuation removal or extra whitespace) produced double hyphens; fixed by collapsing runs of spaces into a single hyphen."
+          },
+          "name": "finish",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 152,
+        "cache_creation_input_tokens": 426,
+        "cache_read_input_tokens": 2232
+      }
+    }
+  ]
+}

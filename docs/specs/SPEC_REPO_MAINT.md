@@ -322,6 +322,94 @@ The pydantic models in `agents/repo_maint/schema.py` are exported to `schemas/re
 
 `id: "repo_maint"`, `route: "/repos"`, `expected_interval_hours: 24`, `next_run_hint: "Daily 07:00 PT"`, `items_count` = repos watched.
 
+### 6.1 Additive fields (schema 1.1.0, agents-core v0.3.0), incl. fix proposals
+
+Added 2026-09-27. Every §6 field above keeps its name, type and meaning; these are
+**additive only**, so a consumer of 1.0.0 keeps working if it ignores unknown keys.
+`schema_version` is `"1.1.0"`.
+
+**From agents-core (shared, every agent):**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `meta.warnings` | `string[]` | Non-fatal problems in an `ok` run, in plain language: a repo that was unreachable, issues left for the next run, a changelog that fell back to the template, a stopped fix loop, or no Anthropic key. Usually `[]`. |
+| `meta.meta_schema_version` | `"1.1.0"` | Version of the shared `meta` block itself. |
+| `key_stats[].delta` | `number \| null` | Change since the previous published run's stat with the same label; `null` on a first run or a new stat. Computed in code. |
+| `key_stats[].delta_format` | `"count_signed"` | Always one of agents-core's standard `StatFormat`s. |
+
+`narrative_source` (changelog, fix proposals) is agents-core's `"llm" | "template"`:
+`"template"` is any deterministic, non-LLM text (the §7.3 grouping, a guard fallback,
+a run without a key). It replaces the earlier `"deterministic"`, which no longer appears.
+
+With **no Anthropic key** the run still publishes with `status: "ok"` and a warning:
+untriaged issues are counted but not scored (`triage: []`), changelogs use the
+template, and the fix proposer doesn't run.
+
+The run also publishes agents-core's `trace.json` / `trace.schema.json` (spans for
+each phase, each repo's fetch/compute/triage/changelog, every LLM call, HTTP request,
+guard check, agent loop and tool call; redacted and size-capped) and a
+`trace_summary` in `manifest-entry.json`. Neither is part of `latest.json`.
+
+**`repos[i].fix_proposals`** (always present; `[]` unless the repo is a sandbox with
+`allow_fix_prs = true`):
+
+```json
+{
+  "id": "3f9a1c0b7e21",
+  "issue_number": 3,
+  "issue_url": "https://github.com/you/agents-hub-sandbox/issues/3",
+  "issue_title": "First page of the transaction list skips the first 10 rows",
+  "status": "proposed",
+  "reason": null,
+  "summary": "paginate() computed the start index from the page number instead of page - 1.",
+  "rationale": "Pages are 1-based, so page 1 must start at index 0.",
+  "narrative_source": "llm",
+  "diff": "--- a/ledgerlite/pagination.py\n+++ b/ledgerlite/pagination.py\n@@ …",
+  "files_changed": ["ledgerlite/pagination.py"],
+  "lines_added": 1,
+  "lines_removed": 1,
+  "pr_url": null,
+  "loop": { "steps": 4, "stop_reason": "finished", "usd": 0.0129, "tools_called": ["search_code", "read_file", "propose_patch"] },
+  "model": "claude-sonnet-5",
+  "proposed_at": "2026-09-27T14:02:11Z"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 12 hex digits, `sha256(repo#issue, issue text hash, diff)`. What a human approves; bound to the exact diff. |
+| `status` | `proposed` (a patch that applies; awaiting human approval) · `no_fix` (the model found no small, safe fix) · `stopped` (the loop hit a budget, refused, or ended without `finish`; `reason` says which) · `approval_blocked` (approved, but a write gate failed; `reason` lists them) · `pr_opened` · `failed` (approved, gates passed, but the diff no longer applies or GitHub refused; `reason`). |
+| `summary` | The loop's `finish` summary: number-guarded against the issue text and the diff (one retry, then a template, flagged by `narrative_source`), then sanitized like §8.4. |
+| `rationale` | From `propose_patch`, sanitized (§8.4) and number-guarded; dropped (`null`) on failure rather than retried. |
+| `diff`, `files_changed`, `lines_added`, `lines_removed` | The validated unified diff and counts computed by code from it. `null`/`[]`/`0` without a patch. |
+| `loop` | `steps` (model calls), `stop_reason` (agents-core `LoopResult.stop_reason`), `usd`, `tools_called`, in order. |
+| `pr_url` | The draft PR, once opened. |
+
+**How proposals are made.** For a sandbox repo with `allow_fix_prs = true`, after
+triage: each untriaged issue triaged as `bug` with `confidence: high`, priority not
+`p0`, no missing steps to reproduce and a body of at most 3,000 characters ("small
+scope") gets one agents-core `AgentLoop` run, at most `max_fix_proposals_per_run`
+(**2**) per run, each with `LoopBudget(max_steps=12, max_usd=0.15)` under the run's
+MAX_RUN_USD. The tools are `list_files(dir)`, `read_file(path)`, `search_code(query)`
+(all read-only, on the default branch's head commit) and `propose_patch(diff,
+rationale)`, which applies the diff **in memory** to validate it (at most 3 files and
+80 changed lines, no deletions or renames, nothing under `.github/`) and records it.
+The loop ends with `finish({outcome, summary})`. Tool output is wrapped as untrusted
+data; the model has no write tool. An issue is attempted once per version of its text
+(state.json keeps every attempt), and entries disappear when the issue closes.
+
+**How a proposal becomes a pull request (human approval).** Never automatically. A
+maintainer reads the proposal (diff included) in `latest.json`, then runs the
+workflow in apply mode with the `approve_fix` dispatch input (`--approve-fix <id>`). In that run the
+agent opens a **draft** PR only if all five §8.1 gates pass **and** the repo has
+`allow_fix_prs = true` and role `sandbox` **and** the id was approved: it re-reads the
+current default branch, re-applies the stored diff (else `failed`), and calls
+`gh.create_draft_pr` (§8.2). The PR comes from a new `repo-maint/fix-<issue>-<id>`
+branch, starts with the banner "**Proposed by repo-maint agent; needs human
+review.**", links the issue ("Related issue: #n", which doesn't auto-close it), and
+lists the summary, rationale and changed files. The agent never merges and never
+enables auto-merge.
+
 ---
 
 ## 7. LLM usage
@@ -394,8 +482,9 @@ If any gate fails, actions are logged as `planned` with the reason.
 |---|---|
 | `add_labels` | Only labels from the allowlist that **already exist** in the repo. Labels are added, never removed. At most 3 labels per issue. |
 | `comment` | At most **one** agent comment per issue, ever (§8.3), and only on untriaged issues where `confidence != low`. |
+| `create_draft_pr` | Added 2026-09-27 (§6.1), marked `requires_approval`. Only for a sandbox repo with `allow_fix_prs = true`, only for a fix proposal a human approved by id, and only when all five gates pass; `gh.py` refuses without a matching `FixPRApproval`. Creates one new `repo-maint/fix-*` branch, commits the proposal's files to it, and opens a **draft** PR with the human-review banner. Never merges, never enables auto-merge. Counts as one write against the limits below. |
 
-There are **no** other write endpoints in `gh.py`. The client exposes typed methods for exactly these two writes, so the code can't express anything else.
+There are **no** other write endpoints in `gh.py`. The client exposes typed methods for exactly these three writes, so the code can't express anything else (enforced by an AST test).
 
 Additional limits:
 - `max_writes_per_run` (default **15**, across all repos).
@@ -429,15 +518,18 @@ Before commenting, the agent fetches the issue's comments. If any comment contai
 ### 8.5 Prompt-injection posture
 
 - Issue, PR and commit text is always wrapped in delimiters and labeled untrusted.
-- The model has **no tools**. Its output is schema-constrained, and code validates every field against allowlists.
+- The triage and changelog model has **no tools**. Its output is schema-constrained, and code validates every field against allowlists.
+- The fix proposer (§6.1) has read-only tools and `propose_patch`, which only validates a diff in memory. It has no write tool; every tool output is wrapped in agents-core's untrusted-content delimiters; its summary is number-guarded and sanitized; a PR needs a human approval of the exact diff plus every write gate.
 - Writes are determined by code from validated fields, never from free text.
 - Evals include injection fixtures (§11).
 
 ### 8.6 Workflow permissions (least privilege)
 
 Two jobs in `agent-repo-maint.yml`:
-- `report` runs when `vars.APPLY_CHANGES != 'true'`, with permissions `contents: write` (for the data commit), `issues: read` and `pull-requests: read`.
-- `apply` runs when `vars.APPLY_CHANGES == 'true'`, with `contents: write`, `issues: write` and `pull-requests: read`, and passes `--apply`.
+- `report` runs when `vars.APPLY_CHANGES != 'true'`, with permissions `contents: write` (for the data commit), `issues: read`, `pull-requests: read` and `checks: read` (the CI signal in §5.6).
+- `apply` runs when `vars.APPLY_CHANGES == 'true'`, with `contents: write`, `issues: write`, `pull-requests: read` and `checks: read`, and passes `--apply` and `apply_changes: true`.
+
+Both call agents-core's `run-agent.yml@v0.3.0`, which declares no permissions of its own and so runs with exactly the calling job's grant. Fix-proposal PRs on the sandbox are written with `REPO_MAINT_TOKEN` (a fine-grained PAT for the sandbox only), never with the workflow token, so neither job grants `pull-requests: write`.
 
 ---
 

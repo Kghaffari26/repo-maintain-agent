@@ -264,17 +264,26 @@ def test_key_stats_carry_deltas_in_a_standard_format():
     assert all(k["delta"] is None for k in first.values())
     assert {k["delta_format"] for k in first.values()} == {"count_signed"}
 
-    previous = previous_key_stats({"key_stats": [{"label": "Untriaged issues", "value": 5}]})
-    result = run(
-        _config(),
-        State(),
-        lambda repo: gh_client(make_handler()),
-        now=NOW,
-        previous_stats=previous,
-    )
-    stats = {k["label"]: k for k in result.body["key_stats"]}
+    def run_after(previous_latest):
+        result = run(
+            _config(),
+            State(),
+            lambda repo: gh_client(make_handler()),
+            now=NOW,
+            previous_stats=previous_key_stats(previous_latest),
+        )
+        return {k["label"]: k for k in result.body["key_stats"]}
+
+    same_repos = {
+        "key_stats": [{"label": "Untriaged issues", "value": 5}],
+        "repos": [{"full_name": "you/widgets"}],
+    }
+    stats = run_after(same_repos)
     assert stats["Untriaged issues"]["delta"] == -3.0  # 2 now vs 5 before
     assert stats["Stale PRs"]["delta"] is None
+    # a different set of repos watched: totals aren't comparable, so no deltas
+    stats = run_after({**same_repos, "repos": [{"full_name": "you/widgets"}, {"full_name": "x/y"}]})
+    assert all(k["delta"] is None for k in stats.values())
     assert previous_key_stats(None) is None
 
 

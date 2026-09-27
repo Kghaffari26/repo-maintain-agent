@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "model": "claude-sonnet-5",
+  "responses": [
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 1
+      },
+      "content": [
+        {
+          "id": "toolu_01XU3mHyS6DFQSd1vkfW45ch",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "query": "def month_bounds"
+          },
+          "name": "search_code",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 52,
+        "cache_creation_input_tokens": 337,
+        "cache_read_input_tokens": 1578
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 3
+      },
+      "content": [
+        {
+          "id": "toolu_011aodGNuwm8Bfy7i4d3986N",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "path": "ledgerlite/dates.py"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 57,
+        "cache_creation_input_tokens": 127,
+        "cache_read_input_tokens": 1915
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 5
+      },
+      "content": [
+        {
+          "id": "toolu_016tELihDav9iBn48JeDxEcA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "diff": "--- a/ledgerlite/dates.py\n+++ b/ledgerlite/dates.py\n@@ -14,6 +14,9 @@\n def month_bounds(year: int, month: int) -> tuple[date, date]:\n     \"\"\"The first and last day of a month.\"\"\"\n     first = date(year, month, 1)\n-    last = date(year, month + 1, 1) - timedelta(days=1)\n+    if month == 12:\n+        last = date(year + 1, 1, 1) - timedelta(days=1)\n+    else:\n+        last = date(year, month + 1, 1) - timedelta(days=1)\n     return first, last\n",
+            "rationale": "month_bounds computed date(year, month+1, 1) which raises ValueError for December (month=13). Handle December by rolling over to next year's January instead."
+          },
+          "name": "propose_patch",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 325,
+        "cache_creation_input_tokens": 274,
+        "cache_read_input_tokens": 2042
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 7
+      },
+      "content": [
+        {
+          "id": "toolu_01TDumgYd3zuQhmSpxmeptnb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "outcome": "patch_proposed",
+            "summary": "month_bounds crashed for December because it tried to construct date(year, 13, 1); fixed by rolling over to January of the next year when month is 12."
+          },
+          "name": "finish",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 121,
+        "cache_creation_input_tokens": 430,
+        "cache_read_input_tokens": 2316
+      }
+    },
+    {
+      "request": {
+        "tools": [
+          "list_files",
+          "propose_patch",
+          "read_file",
+          "search_code",
+          "finish"
+        ],
+        "n_messages": 9
+      },
+      "content": [
+        {
+          "id": "toolu_01R3NGmjvscNqCLXjoVsqsM6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "outcome": "patch_proposed",
+            "summary": "month_bounds crashed for December because it tried to construct an invalid date using month+1; fixed by rolling over to January of the next year when month is 12."
+          },
+          "name": "finish",
+          "type": "tool_use"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 121,
+        "cache_creation_input_tokens": 159,
+        "cache_read_input_tokens": 2746
+      }
+    }
+  ]
+}
