@@ -3,27 +3,32 @@
 The shared blocks (``Model``, ``Timestamp``, ``RunMeta``, ``KeyStat``, ...) come
 from ``agents_core.schema``. ``agents_core.runner`` builds ``meta`` itself and
 validates ``{**body, "meta": meta}`` against ``RepoMaintOutput``; the §6 meta
-extensions (``github_requests``, ``github_304s``) ride in the body under
-``META_EXTRA_KEY`` and are folded into ``meta`` by a before-validator, so the
-published JSON keeps exactly the §6 shape.
+extensions (``github_requests``, ``github_304s``) are declared on ``RepoMaintMeta``
+and returned in ``AgentResult.meta_fields`` (agents-core >= v0.2.0).
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from agents_core.schema import AgentOutput, KeyStat, Model, RunMeta, Timestamp
-from pydantic import Field, HttpUrl, model_validator
+from agents_core.schema import (
+    AgentOutput,
+    KeyStat,
+    Model,
+    NarrativeSource,
+    RunMeta,
+    Timestamp,
+)
+from pydantic import Field, HttpUrl
 
-#: Body key that carries meta extensions past agents_core.runner's own meta block.
-META_EXTRA_KEY = "_meta_extra"
+__all__ = ["KeyStat", "NarrativeSource"]
 
 
 class RepoMaintMeta(RunMeta):
     """The repo_maint-specific extension of the shared meta block (§6)."""
 
-    github_requests: int = Field(ge=0)
-    github_304s: int = Field(ge=0)
+    github_requests: int = Field(default=0, ge=0)
+    github_304s: int = Field(default=0, ge=0)
 
 
 # -- §6 repo_maint-specific shapes ------------------------------------------------
@@ -34,7 +39,6 @@ CIState = Literal["success", "failure", "pending", "none"]
 ReviewState = Literal["none", "review_requested", "changes_requested", "approved", "commented"]
 ActionType = Literal["add_labels", "comment"]
 ActionStatus = Literal["planned", "applied", "skipped", "failed"]
-NarrativeSource = Literal["llm", "deterministic"]
 ChangelogSource = Literal["pull_requests", "commits"]
 
 
@@ -154,13 +158,3 @@ class RepoMaintOutput(AgentOutput):
     mode: Mode
     repos: list[RepoEntry]
     actions: list[ActionEntry]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _fold_meta_extra(cls, data: Any) -> Any:
-        if isinstance(data, dict) and META_EXTRA_KEY in data:
-            data = dict(data)
-            extra = data.pop(META_EXTRA_KEY)
-            data["meta"] = {**dict(data.get("meta") or {}), **extra}
-        return data
-

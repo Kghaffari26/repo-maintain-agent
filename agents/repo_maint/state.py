@@ -1,8 +1,9 @@
 """``data/repo_maint/state.json`` read/write (SPEC_REPO_MAINT.md §4).
 
-State is the single source of truth for ETags, the triage/changelog
-caches, and the two layers of double-post protection (``commented``,
-``labeled``). It's committed to the repo, not regenerated from scratch
+State is the single source of truth for the triage/changelog caches and the
+two layers of double-post protection (``commented``, ``labeled``). Conditional-read
+(ETag) bodies live next to it under ``data/repo_maint/github/``. It's committed to
+the repo, not regenerated from scratch
 each run.
 """
 
@@ -16,10 +17,6 @@ from pydantic import BaseModel, Field
 
 
 class RepoState(BaseModel):
-    etags: dict[str, str | None] = Field(default_factory=dict)
-    # The items each current ETag was served with, so a 304 yields real data. Pruned
-    # every run to the ETags still in ``etags`` (see pipeline.collect_repo).
-    etag_bodies: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     triage_cache: dict[str, dict[str, Any]] = Field(default_factory=dict)
     changelog_cache: dict[str, Any] | None = None
     commented: list[int] = Field(default_factory=list)

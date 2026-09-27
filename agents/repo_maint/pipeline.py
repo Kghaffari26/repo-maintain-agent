@@ -71,17 +71,10 @@ class RepoFetch:
     changelog_partial: bool
 
 
-def fetch_repo_data(
-    repo: RepoConfig, client: GitHubClient, repo_state: RepoState, now: datetime
-) -> RepoFetch:
-    """All GitHub reads for one repo (§3). Updates the repo's ETags in state."""
-    client.etag_bodies = repo_state.etag_bodies
-    prior_etags = fetch_mod.RepoEtags(**repo_state.etags)
-    snapshot = fetch_mod.fetch_repo(client, repo, now=now, prior_etags=prior_etags)
-    repo_state.etags = asdict(snapshot.etags)
-    live = {etag for etag in repo_state.etags.values() if etag}
-    repo_state.etag_bodies = {k: v for k, v in client.etag_bodies.items() if k in live}
-    client.etag_bodies = repo_state.etag_bodies
+def fetch_repo_data(repo: RepoConfig, client: GitHubClient, now: datetime) -> RepoFetch:
+    """All GitHub reads for one repo (§3). Conditional reads keep their ETags and
+    bodies in the client's ``cache_dir`` (agents-core ``Http.download``)."""
+    snapshot = fetch_mod.fetch_repo(client, repo, now=now)
 
     default_branch = snapshot.meta.get("default_branch", "main")
     base = changelog_mod.select_base(snapshot.latest_release, snapshot.tags, now)
@@ -362,7 +355,11 @@ def finish_repo(
     classify_factory: ClassifyFactory | None = None,
     draft_fn: changelog_mod.DraftFn | None = None,
     draft_model: str | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[schema.RepoEntry, list[schema.ActionEntry]]:
+    """Triage, changelog and actions for one repo. Non-fatal problems are appended
+    to ``warnings`` (published as ``meta.warnings``)."""
+    warnings = warnings if warnings is not None else []
     repo = work.repo
     snapshot = work.fetched.snapshot
     client = work.fetched.client
@@ -381,6 +378,12 @@ def finish_repo(
         config.settings.max_triage_per_repo_per_run,
     )
     triage_items = _build_triage_items(triage_results, repo, work.issues_by_number)
+    not_triaged = sum(1 for result, _ in triage_results if result is None)
+    if classify_fn is not None and not_triaged:
+        warnings.append(
+            f"{repo.full_name}: {not_triaged} of {len(triage_results)} untriaged issues weren't"
+            " triaged this run (per-run cap, spend cap or a failed model call); retried next run"
+        )
     for issue, (result, _cached) in zip(work.untriaged_issues, triage_results, strict=True):
         if result is not None:
             repo_state.triage_cache[str(issue["number"])] = {
@@ -404,6 +407,10 @@ def finish_repo(
         cache=cache,
         draft_fn=draft_fn,
     )
+    if draft_fn is not None and not changelog_result.cacheable:
+        warnings.append(
+            f"{repo.full_name}: the changelog model call failed; published the template grouping"
+        )
     if changelog_result.cached and cache:
         generated_at = metrics_mod.parse_dt(cache.get("generated_at") or now.isoformat())
         model = cache.get("model")
@@ -520,16 +527,43 @@ def schema_iso(dt: datetime) -> str:
 # -- assembling the §6 body ----------------------------------------------------------------
 
 
+def _key_stat(
+    label: str, value: float, direction: str, previous: dict[str, float] | None
+) -> schema.KeyStat:
+    """A §6 key stat. ``delta`` is the change since the previous published run's stat
+    of the same label (None on a first run); ``delta_format`` is always a standard
+    agents-core format."""
+    prior = (previous or {}).get(label)
+    return schema.KeyStat(
+        label=label,
+        value=value,
+        format="count",
+        delta=None if prior is None else value - prior,
+        delta_format="count_signed",
+        good_direction=direction,
+    )
+
+
+def previous_key_stats(previous_latest: dict[str, Any] | None) -> dict[str, float] | None:
+    """``{label: value}`` from the previous ``latest.json``'s key stats, if any."""
+    if not previous_latest:
+        return None
+    stats = {}
+    for stat in previous_latest.get("key_stats") or []:
+        if isinstance(stat, dict) and isinstance(stat.get("value"), int | float):
+            stats[str(stat.get("label"))] = float(stat["value"])
+    return stats
+
+
 def build_body(
     repo_entries: list[schema.RepoEntry],
     all_actions: list[schema.ActionEntry],
     *,
     configured: int,
-    github_requests: int,
-    github_304s: int,
+    previous_stats: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Every top-level §6 field except ``meta`` (agents_core.runner adds that),
-    plus the meta extensions under ``schema.META_EXTRA_KEY``."""
+    """Every top-level §6 field except ``meta`` (agents_core.runner adds that; the
+    §6 meta extensions go in ``AgentResult.meta_fields``, see ``RunResult``)."""
     mode: schema.Mode = "apply" if any(a.status == "applied" for a in all_actions) else "report"
     scores = [entry.health.score for entry in repo_entries]
     avg_health = round(sum(scores) / len(scores)) if scores else None
@@ -548,20 +582,10 @@ def build_body(
         f"{total_stale} stale PR{'s' if total_stale != 1 else ''}."
     )
 
-    key_stats = [
-        schema.KeyStat(
-            label="Untriaged issues", value=total_untriaged, format="count", good_direction="down"
-        ),
-    ]
+    key_stats = [_key_stat("Untriaged issues", total_untriaged, "down", previous_stats)]
     if avg_health is not None:
-        key_stats.append(
-            schema.KeyStat(
-                label="Avg health", value=avg_health, format="count", good_direction="up"
-            )
-        )
-    key_stats.append(
-        schema.KeyStat(label="Stale PRs", value=total_stale, format="count", good_direction="down")
-    )
+        key_stats.append(_key_stat("Avg health", avg_health, "up", previous_stats))
+    key_stats.append(_key_stat("Stale PRs", total_stale, "down", previous_stats))
 
     return {
         "headline": headline,
@@ -569,7 +593,6 @@ def build_body(
         "mode": mode,
         "repos": [e.model_dump(mode="json") for e in repo_entries],
         "actions": [a.model_dump(mode="json") for a in all_actions],
-        schema.META_EXTRA_KEY: {"github_requests": github_requests, "github_304s": github_304s},
     }
 
 
@@ -582,6 +605,11 @@ class RunResult:
     repo_entries: list[schema.RepoEntry]
     actions: list[schema.ActionEntry]
     failed: dict[str, str]
+    #: ``RepoMaintMeta`` values (``github_requests``, ``github_304s``), for
+    #: ``AgentResult.meta_fields``.
+    meta_fields: dict[str, int] = field(default_factory=dict)
+    #: Non-fatal problems, for ``meta.warnings`` ("ok with a warning").
+    warnings: list[str] = field(default_factory=list)
 
 
 def fetch_all(
@@ -596,9 +624,7 @@ def fetch_all(
     for repo in config.repo:
         try:
             client = build_client(repo)
-            fetched.append(
-                fetch_repo_data(repo, client, get_repo_state(state, repo.full_name), now)
-            )
+            fetched.append(fetch_repo_data(repo, client, now))
         except REPO_FAILURES as e:
             log.error("%s: skipped this run: %s", repo.full_name, e)
             failed[repo.full_name] = str(e)
@@ -618,6 +644,7 @@ def run(
     classify_factory: ClassifyFactory | None = None,
     draft_fn: changelog_mod.DraftFn | None = None,
     draft_model: str | None = None,
+    previous_stats: dict[str, float] | None = None,
 ) -> RunResult:
     """Runs every configured repo. Mutates ``state`` in place (caller saves it)."""
     now = now or datetime.now(UTC)
@@ -634,6 +661,7 @@ def run(
         classify_factory=classify_factory,
         draft_fn=draft_fn,
         draft_model=draft_model,
+        previous_stats=previous_stats,
     )
 
 
@@ -649,8 +677,10 @@ def finish_all(
     classify_factory: ClassifyFactory | None,
     draft_fn: changelog_mod.DraftFn | None,
     draft_model: str | None,
+    previous_stats: dict[str, float] | None = None,
 ) -> RunResult:
     """Stage 3 over every computed repo, then the §6 body."""
+    warnings = [f"{name}: skipped this run ({reason})" for name, reason in failed.items()]
     budget = actions_mod.RunBudget(
         max_writes_per_run=config.settings.max_writes_per_run,
         max_writes_per_repo_per_day=config.settings.max_writes_per_repo_per_day,
@@ -669,6 +699,7 @@ def finish_all(
             classify_factory=classify_factory,
             draft_fn=draft_fn,
             draft_model=draft_model,
+            warnings=warnings,
         )
         repo_entries.append(entry)
         all_actions.extend(actions_out)
@@ -677,7 +708,17 @@ def finish_all(
         repo_entries,
         all_actions,
         configured=len(config.repo),
-        github_requests=sum(w.fetched.client.requests_made for w in works),
-        github_304s=sum(w.fetched.client.not_modified_count for w in works),
+        previous_stats=previous_stats,
     )
-    return RunResult(body=body, repo_entries=repo_entries, actions=all_actions, failed=failed)
+    meta_fields = {
+        "github_requests": sum(w.fetched.client.requests_made for w in works),
+        "github_304s": sum(w.fetched.client.not_modified_count for w in works),
+    }
+    return RunResult(
+        body=body,
+        repo_entries=repo_entries,
+        actions=all_actions,
+        failed=failed,
+        meta_fields=meta_fields,
+        warnings=warnings,
+    )

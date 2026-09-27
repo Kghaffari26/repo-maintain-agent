@@ -17,7 +17,6 @@ def test_save_and_load_round_trip(tmp_path: Path):
     state = State(
         repos={
             "you/repo": RepoState(
-                etags={"issues_open": 'W/"abc"'},
                 triage_cache={"42": {"hash": "deadbeef", "result": {}, "prompt_version": "v1"}},
                 changelog_cache={"base_ref": "v0.3.0", "pr_set_hash": "abc", "markdown": "## x"},
                 commented=[42, 57],
@@ -28,7 +27,6 @@ def test_save_and_load_round_trip(tmp_path: Path):
     save_state(path, state)
     reloaded = load_state(path)
 
-    assert reloaded.repos["you/repo"].etags == {"issues_open": 'W/"abc"'}
     assert reloaded.repos["you/repo"].commented == [42, 57]
     assert reloaded.repos["you/repo"].labeled == {"42": ["bug"]}
     assert reloaded.repos["you/repo"].triage_cache["42"]["hash"] == "deadbeef"
@@ -51,3 +49,12 @@ def test_get_repo_state_reuses_existing_entry():
     state = State(repos={"you/repo": RepoState(commented=[1])})
     repo_state = get_repo_state(state, "you/repo")
     assert repo_state.commented == [1]
+
+
+def test_old_state_files_with_etag_bodies_still_load(tmp_path: Path):
+    """Before the move to Http.download, ETags and their bodies lived in state.json."""
+    path = tmp_path / "state.json"
+    path.write_text('{"repos": {"you/repo": {"etags": {"meta": "x"}, "etag_bodies": {"x": []}}}}')
+    state = load_state(path)
+    save_state(path, state)
+    assert "etag_bodies" not in path.read_text()

@@ -286,12 +286,13 @@ def draft_changelog(
     draft_fn: DraftFn | None = None,
 ) -> tuple[str, str]:
     """Returns ``(markdown, narrative_source)``, ``narrative_source`` is "llm" or
-    "deterministic". With no ``draft_fn`` (``--dry-run``) or no items, goes
-    straight to the deterministic grouping without a model call. Raises
+    "template" (agents-core's name for any deterministic, non-LLM text). With no
+    ``draft_fn`` (``--dry-run``, no API key) or no items, goes straight to the
+    deterministic grouping without a model call. Raises
     ``ModelUnavailable`` when the model itself fails, so the caller can fall
     back *without* caching that fallback as the final draft."""
     if draft_fn is None or not items:
-        return deterministic_markdown(items, version_heading), "deterministic"
+        return deterministic_markdown(items, version_heading), "template"
 
     try:
         markdown = draft_fn(version_heading, items, None)
@@ -313,7 +314,7 @@ def draft_changelog(
         raise ModelUnavailable(str(e)) from e
 
     log.warning("changelog guard failed twice; using the deterministic grouping")
-    return deterministic_markdown(items, version_heading), "deterministic"
+    return deterministic_markdown(items, version_heading), "template"
 
 
 # -- the §7.3 prompt ------------------------------------------------------------------
@@ -384,11 +385,17 @@ class ChangelogResult:
     item_count: int
     suggested_version: str | None
     markdown: str
-    narrative_source: str  # "llm" | "deterministic"
+    narrative_source: str  # "llm" | "template"
     cached: bool
     # False when the draft is a fallback because the model was unavailable (or not
     # asked, in a dry run): don't let it stand in for a real draft next run.
     cacheable: bool = True
+
+
+def _cached_source(cache: dict[str, Any]) -> str:
+    """Cache entries written before agents-core v0.2.0 say "deterministic"."""
+    source = cache.get("narrative_source", "llm")
+    return "template" if source == "deterministic" else source
 
 
 def build_changelog(
@@ -416,7 +423,7 @@ def build_changelog(
             item_count=len(items),
             suggested_version=suggest_version(items, base),
             markdown=cache["markdown"],
-            narrative_source=cache.get("narrative_source", "llm"),
+            narrative_source=_cached_source(cache),
             cached=True,
         )
 
@@ -425,7 +432,7 @@ def build_changelog(
         markdown, narrative_source = draft_changelog(items, version_heading, draft_fn)
     except ModelUnavailable as e:
         log.warning("changelog model call failed (%s); using the deterministic grouping", e)
-        markdown, narrative_source = deterministic_markdown(items, version_heading), "deterministic"
+        markdown, narrative_source = deterministic_markdown(items, version_heading), "template"
         cacheable = False
     return ChangelogResult(
         base_ref=base.ref,

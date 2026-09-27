@@ -9,7 +9,6 @@ from agents_core.schema import AgentOutput, ModelUsage, RunMeta
 from pydantic import ValidationError
 
 from agents.repo_maint.schema import (
-    META_EXTRA_KEY,
     ActionEntry,
     Activity12w,
     ChangelogBlock,
@@ -67,7 +66,7 @@ def make_output() -> RepoMaintOutput:
             item_count=0,
             suggested_version=None,
             markdown="## [Unreleased]\n",
-            narrative_source="deterministic",
+            narrative_source="template",
             model=None,
             generated_at=NOW,
             cached=False,
@@ -160,23 +159,28 @@ def test_output_builds_on_agents_core_models():
     assert issubclass(RepoMaintMeta, RunMeta)
 
 
-def test_meta_extra_is_folded_into_meta_like_agents_core_runner_needs():
-    """agents_core.runner validates {**body, "meta": <its own RunMeta>}; the §6 meta
-    extensions ride in the body under META_EXTRA_KEY and must land in meta."""
+def test_meta_extensions_have_defaults_and_publish_inside_meta():
+    """agents-core merges AgentResult.meta_fields into meta; a RunMeta subclass needs
+    defaults for every field it adds."""
     dumped = make_output().model_dump(mode="json")
-    meta = dumped.pop("meta")
+    meta = dumped["meta"]
     runner_meta = {k: v for k, v in meta.items() if k not in {"github_requests", "github_304s"}}
-    body = {**dumped, META_EXTRA_KEY: {"github_requests": 7, "github_304s": 3}}
-
-    output = RepoMaintOutput.model_validate({**body, "meta": runner_meta})
-
+    output = RepoMaintOutput.model_validate({**dumped, "meta": runner_meta})
+    assert output.meta.github_requests == 0 and output.meta.github_304s == 0
+    merged = {**runner_meta, "github_requests": 7, "github_304s": 3}
+    output = RepoMaintOutput.model_validate({**dumped, "meta": merged})
     assert output.meta.github_requests == 7
-    assert output.meta.github_304s == 3
-    assert META_EXTRA_KEY not in output.model_dump(mode="json")
+    assert output.model_dump(mode="json")["meta"]["github_304s"] == 3
 
 
-def test_meta_extensions_are_required():
+def test_narrative_source_is_agents_core_llm_or_template():
     dumped = make_output().model_dump(mode="json")
-    del dumped["meta"]["github_304s"]
+    dumped["repos"][0]["changelog"]["narrative_source"] = "deterministic"
+    with pytest.raises(ValidationError):
+        RepoMaintOutput.model_validate(dumped)
+
+def test_meta_extensions_must_be_non_negative():
+    dumped = make_output().model_dump(mode="json")
+    dumped["meta"]["github_304s"] = -1
     with pytest.raises(ValidationError):
         RepoMaintOutput.model_validate(dumped)

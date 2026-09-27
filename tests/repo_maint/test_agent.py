@@ -11,7 +11,13 @@ import httpx
 import pytest
 from agents_core import registry, runner
 
-from agents.repo_maint.agent import AGENT, RepoMaintAgent, repos_filter
+from agents.repo_maint.agent import (
+    AGENT,
+    NO_KEY_WARNING,
+    RepoMaintAgent,
+    llm_available,
+    repos_filter,
+)
 from agents.repo_maint.schema import RepoMaintOutput
 from tests.repo_maint.fakes import FakeAnthropic, mock_http
 from tests.repo_maint.test_pipeline import TRIAGE, make_handler
@@ -88,7 +94,14 @@ def test_report_run_publishes_the_data_branch_contract(agent, tmp_path):
     assert _run(agent, requests=requests, llm=llm) == 0
 
     publish = tmp_path / "public-data"
-    for name in ("latest.json", "manifest-entry.json", "costs-summary.json", "schema.json"):
+    for name in (
+        "latest.json",
+        "manifest-entry.json",
+        "costs-summary.json",
+        "schema.json",
+        "trace.json",
+        "trace.schema.json",
+    ):
         assert (publish / name).is_file(), name
     assert len(list((publish / "history").glob("*.json"))) == 1
 
@@ -99,10 +112,13 @@ def test_report_run_publishes_the_data_branch_contract(agent, tmp_path):
     assert output.meta.cost_usd > 0
     assert output.mode == "report"
     assert all(a["status"] == "planned" for a in latest["actions"])
-    assert "_meta_extra" not in latest
+    assert latest["meta"]["warnings"] == []
+    assert latest["meta"]["meta_schema_version"] == "1.1.0"
+    assert {k["delta_format"] for k in latest["key_stats"]} == {"count_signed"}
 
     manifest = json.loads((publish / "manifest-entry.json").read_text())
     assert manifest["id"] == "repo_maint" and manifest["items_count"] == 1
+    assert manifest["trace_summary"]["llm_calls"] == 2
     assert all(r.method == "GET" for r in requests)  # §13: zero writes in report mode
     assert agent.state_path.is_file()
     assert (tmp_path / "data" / "costs.jsonl").is_file()
@@ -126,3 +142,41 @@ def test_unknown_repos_filter_fails_the_run(agent, tmp_path):
     assert _run(agent, extra_args=["--repos", "you/nope"]) == 1
     manifest = json.loads((Path(tmp_path) / "public-data" / "manifest-entry.json").read_text())
     assert manifest["status"] == "failed"
+
+
+def test_no_api_key_publishes_ok_with_a_warning_and_template_output(agent, tmp_path, monkeypatch):
+    """agents-hub report: with no Anthropic key the run must not crash."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTS_ANTHROPIC_API_KEY", raising=False)
+    requests: list[httpx.Request] = []
+
+    def track(request: httpx.Request) -> None:
+        requests.append(request)
+
+    assert runner.run(agent, http=mock_http(make_handler(track))) == 0
+
+    latest = json.loads((tmp_path / "public-data" / "latest.json").read_text())
+    assert latest["meta"]["status"] == "ok"
+    assert latest["meta"]["warnings"] == [NO_KEY_WARNING]
+    assert latest["meta"]["cost_usd"] == 0
+    repo = latest["repos"][0]
+    assert repo["triage"] == [] and repo["counts"]["untriaged"] == 2  # unscored
+    assert repo["changelog"]["narrative_source"] == "template"
+    assert all(r.method == "GET" for r in requests)
+
+
+def test_llm_available_is_false_without_a_key(monkeypatch):
+    from agents_core.costs import CostTracker
+    from agents_core.llm import LLM
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTS_ANTHROPIC_API_KEY", raising=False)
+    assert llm_available(LLM(CostTracker(agent="t", run_id="t"))) is False
+    assert llm_available(LLM(CostTracker(agent="t", run_id="t"), client=FakeAnthropic([])))
+
+
+def test_github_host_gets_a_daily_cap_and_retries():
+    http = mock_http(make_handler())
+    AGENT.configure_http(http)
+    policy = http.policies["api.github.com"]
+    assert policy.daily_budget == 2000 and policy.attempts(1) == 3

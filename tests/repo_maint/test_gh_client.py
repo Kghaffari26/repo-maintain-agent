@@ -61,56 +61,96 @@ def test_paginate_stops_when_no_next_link():
     assert [item["number"] for item in page.items] == [1]
 
 
-# -- conditional requests (ETags) -----------------------------------------
+# -- conditional requests (ETags, via agents_core Http.download) -----------
 
 
-def test_get_json_returns_cached_body_on_304():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers.get("if-none-match") == 'W/"cached"'
-        return httpx.Response(304, headers={"x-ratelimit-remaining": "4999"})
-
-    client = _client(handler, etag_bodies={'W/"cached"': [{"full_name": "o/r"}]})
-    page = client.get_json("/repos/o/r", etag='W/"cached"')
-
-    assert page.not_modified is True
-    assert page.items == [{"full_name": "o/r"}]
-    assert client.not_modified_count == 1
-
-
-def test_paginate_returns_cached_body_on_304_first_page():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(304, headers={"x-ratelimit-remaining": "4999"})
-
-    client = _client(handler, etag_bodies={'W/"cached"': [{"number": 7}]})
-    page = client.paginate("/repos/o/r/issues", etag='W/"cached"')
-
-    assert page.not_modified is True
-    assert page.items == [{"number": 7}]
-
-
-def test_no_conditional_request_without_a_cached_body():
-    """An ETag whose body isn't known would turn a 304 into an empty list, so
-    the client sends an unconditional request instead."""
-    seen = []
-
+def _etag_handler(body, etag, seen):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request.headers.get("if-none-match"))
-        return httpx.Response(200, json=[{"number": 1}], headers={"etag": 'W/"new"'})
+        if request.headers.get("if-none-match") == etag:
+            return httpx.Response(304, headers={"x-ratelimit-remaining": "4999"})
+        return httpx.Response(200, json=body, headers={"etag": etag})
 
-    client = _client(handler)
-    page = client.paginate("/repos/o/r/issues", etag='W/"orphan"')
-
-    assert seen == [None]
-    assert page.items == [{"number": 1}]
+    return handler
 
 
-def test_fresh_responses_are_remembered_by_etag():
+def test_get_json_is_conditional_with_a_cache_key(tmp_path):
+    seen: list = []
+    client = _client(_etag_handler({"full_name": "o/r"}, 'W/"e1"', seen), cache_dir=tmp_path)
+    first = client.get_json("/repos/o/r", cache_key="meta")
+    second = client.get_json("/repos/o/r", cache_key="meta")
+
+    assert seen == [None, 'W/"e1"']
+    assert first.not_modified is False and first.etag == 'W/"e1"'
+    assert second.not_modified is True
+    assert second.items == [{"full_name": "o/r"}]  # the previous body, from disk
+    assert client.not_modified_count == 1
+    assert client.requests_made == 2
+    assert (tmp_path / "meta.json").is_file() and (tmp_path / "meta.json.meta.json").is_file()
+
+
+def test_paginate_returns_every_cached_page_on_a_first_page_304(tmp_path):
+    seen: list = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=[{"number": 1}], headers={"etag": 'W/"e1"'})
+        page = request.url.params.get("page")
+        seen.append((page, request.headers.get("if-none-match")))
+        if page == "2":
+            return httpx.Response(200, json=[{"number": 3}])
+        if request.headers.get("if-none-match") == 'W/"p1"':
+            return httpx.Response(304)
+        return httpx.Response(200, json=[{"number": 1}, {"number": 2}], headers={"etag": 'W/"p1"'})
 
-    client = _client(handler)
-    client.paginate("/repos/o/r/issues")
-    assert client.etag_bodies == {'W/"e1"': [{"number": 1}]}
+    client = _client(handler, cache_dir=tmp_path)
+    first = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+    second = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+
+    assert [i["number"] for i in first.items] == [1, 2, 3]
+    assert second.not_modified is True
+    assert [i["number"] for i in second.items] == [1, 2, 3]
+    assert seen == [(None, None), ("2", None), (None, 'W/"p1"')]
+
+
+def test_paginate_refetches_when_the_saved_pages_belong_to_another_etag(tmp_path):
+    seen: list = []
+    client = _client(_etag_handler([{"number": 1}], 'W/"e1"', seen), cache_dir=tmp_path)
+    client.paginate("/repos/o/r/issues", cache_key="issues")
+    (tmp_path / "issues.pages.json").write_text('{"etag": "W/\\"old\\"", "items": []}')
+
+    page = client.paginate("/repos/o/r/issues", cache_key="issues")
+    assert page.items == [{"number": 1}]
+    assert seen == [None, 'W/"e1"', None]  # the 304 was followed by a forced re-fetch
+
+
+def test_conditional_404_reads_as_empty(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = _client(handler, cache_dir=tmp_path)
+    assert client.get_json("/repos/o/r", cache_key="meta").items == []
+    assert client.paginate("/repos/o/r/labels", cache_key="labels").items == []
+
+
+def test_conditional_reads_raise_on_other_errors(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "Forbidden"})
+
+    with pytest.raises(gh.GitHubRequestError):
+        _client(handler, cache_dir=tmp_path).get_json("/repos/o/r", cache_key="meta")
+
+
+def test_without_a_cache_dir_reads_are_unconditional():
+    seen: list = []
+    client = _client(_etag_handler([{"number": 1}], 'W/"e1"', seen))
+    client.paginate("/repos/o/r/issues", cache_key="issues")
+    client.paginate("/repos/o/r/issues", cache_key="issues")
+    assert seen == [None, None]
+
+
+def test_cache_keys_must_be_plain_names(tmp_path):
+    client = _client(lambda r: httpx.Response(200, json={}), cache_dir=tmp_path)
+    with pytest.raises(ValueError):
+        client.get_json("/repos/o/r", cache_key="../escape")
 
 
 def test_requests_carry_github_headers_and_bypass_the_http_cache():

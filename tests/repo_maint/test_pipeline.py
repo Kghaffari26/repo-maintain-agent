@@ -11,13 +11,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+from agents_core.llm import LLMError
 from agents_core.schema import ModelUsage, RunMeta
 
 from agents.repo_maint import changelog as changelog_mod
 from agents.repo_maint import triage as triage_mod
 from agents.repo_maint.config import Config, RepoConfig, Settings
 from agents.repo_maint.gh import GitHubClient
-from agents.repo_maint.pipeline import run
+from agents.repo_maint.pipeline import previous_key_stats, run
 from agents.repo_maint.schema import RepoMaintOutput
 from agents.repo_maint.state import State
 from tests.repo_maint.fakes import fake_llm, gh_client
@@ -122,12 +123,12 @@ def _config(*repos: RepoConfig) -> Config:
     return Config(settings=Settings(), repo=list(repos or [REPO]))
 
 
-def _run(on_request=None, state=None, llm=None, config=None, handler=None):
+def _run(on_request=None, state=None, llm=None, config=None, handler=None, cache_dir=None):
     config = config or _config()
     state = state if state is not None else State()
 
     def build_client(repo: RepoConfig) -> GitHubClient:
-        return gh_client(handler or make_handler(on_request))
+        return gh_client(handler or make_handler(on_request), cache_dir=cache_dir)
 
     kwargs = {}
     if llm is not None:
@@ -150,8 +151,9 @@ def _run(on_request=None, state=None, llm=None, config=None, handler=None):
     return result, state
 
 
-def _validate(body) -> RepoMaintOutput:
-    """What agents_core.runner does: add its own meta, validate against the model."""
+def _validate(result) -> RepoMaintOutput:
+    """What agents_core.runner does: add its own meta plus the agent's meta_fields,
+    validate against the model."""
     meta = RunMeta(
         agent="repo_maint",
         schema_version="1.0.0",
@@ -164,12 +166,13 @@ def _validate(body) -> RepoMaintOutput:
         model_usage=ModelUsage(),
         sources=[],
     )
-    return RepoMaintOutput.model_validate({**body, "meta": meta.model_dump(mode="json")})
+    meta_dict = {**meta.model_dump(mode="json"), **result.meta_fields}
+    return RepoMaintOutput.model_validate({**result.body, "meta": meta_dict})
 
 
 def test_pipeline_runs_end_to_end_and_output_validates():
     result, _state = _run()
-    output = _validate(result.body)
+    output = _validate(result)
 
     assert output.mode == "report"
     assert output.meta.github_requests > 0
@@ -203,20 +206,19 @@ def test_pipeline_makes_zero_writes_in_report_mode():
 def test_an_empty_changelog_needs_no_model_and_is_cached():
     _result, state = _run()
     cache = state.repos["you/widgets"].changelog_cache
-    assert cache["narrative_source"] == "deterministic"
+    assert cache["narrative_source"] == "template"
     assert cache["markdown"] == "## Unreleased\n"
 
 
-def test_pipeline_persists_etags_and_their_bodies():
-    _result, state = _run()
-    repo_state = state.repos["you/widgets"]
-    assert repo_state.etags.get("meta") == 'W/"meta-etag"'
-    assert repo_state.etags.get("issues_open") == 'W/"issues-etag"'
-    assert set(repo_state.etag_bodies) == {v for v in repo_state.etags.values() if v}
+def test_conditional_reads_are_cached_on_disk(tmp_path):
+    _run(cache_dir=tmp_path)
+    assert (tmp_path / "meta.json").is_file()
+    assert (tmp_path / "issues_open.json.meta.json").is_file()
+    assert (tmp_path / "issues_open.pages.json").is_file()
 
 
-def test_second_run_gets_304s_and_still_sees_the_same_issues():
-    _result, state = _run()
+def test_second_run_gets_304s_and_still_sees_the_same_issues(tmp_path):
+    _result, state = _run(cache_dir=tmp_path)
 
     seen_if_none_match = {}
 
@@ -229,13 +231,48 @@ def test_second_run_gets_304s_and_still_sees_the_same_issues():
         if is_meta or is_open_issues:
             seen_if_none_match[request.url.path] = request.headers.get("if-none-match")
 
-    result, _state = _run(on_request=track, state=state)
-    output = _validate(result.body)
+    result, _state = _run(on_request=track, state=state, cache_dir=tmp_path)
+    output = _validate(result)
 
     assert seen_if_none_match["/repos/you/widgets"] == 'W/"meta-etag"'
     assert seen_if_none_match["/repos/you/widgets/issues"] == 'W/"issues-etag"'
     assert output.meta.github_304s >= 2
     assert output.repos[0].counts.open_issues == 2  # served from the 304's cached body
+
+
+def test_warnings_name_unreachable_repos_and_untriaged_leftovers(tmp_path):
+    broken = RepoConfig(full_name="you/gone", role="own")
+    base_handler = make_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/repos/you/gone"):
+            return httpx.Response(404, json={"message": "Not Found"})
+        return base_handler(request)
+
+    llm, _client = fake_llm([TRIAGE, LLMError("boom")], tmp_path)
+    result, _state = _run(config=_config(broken, REPO), handler=handler, llm=llm)
+    assert any(w.startswith("you/gone: skipped this run") for w in result.warnings)
+    assert any("1 of 2 untriaged issues weren't triaged" in w for w in result.warnings)
+
+
+def test_key_stats_carry_deltas_in_a_standard_format():
+    result, _state = _run()
+    first = {k["label"]: k for k in result.body["key_stats"]}
+    assert all(k["delta"] is None for k in first.values())
+    assert {k["delta_format"] for k in first.values()} == {"count_signed"}
+
+    previous = previous_key_stats({"key_stats": [{"label": "Untriaged issues", "value": 5}]})
+    result = run(
+        _config(),
+        State(),
+        lambda repo: gh_client(make_handler()),
+        now=NOW,
+        previous_stats=previous,
+    )
+    stats = {k["label"]: k for k in result.body["key_stats"]}
+    assert stats["Untriaged issues"]["delta"] == -3.0  # 2 now vs 5 before
+    assert stats["Stale PRs"]["delta"] is None
+    assert previous_key_stats(None) is None
 
 
 TRIAGE = {
@@ -253,7 +290,7 @@ TRIAGE = {
 def test_llm_run_triages_plans_actions_and_second_run_is_fully_cached(tmp_path):
     llm, client = fake_llm([TRIAGE, {**TRIAGE, "classification": "feature"}], tmp_path)
     result, state = _run(llm=llm)
-    output = _validate(result.body)
+    output = _validate(result)
 
     assert len(client.calls) == 2  # two untriaged issues, no merged PRs -> no changelog call
     assert [t.number for t in output.repos[0].triage] == [1, 2]
@@ -264,7 +301,7 @@ def test_llm_run_triages_plans_actions_and_second_run_is_fully_cached(tmp_path):
 
     llm2, client2 = fake_llm([], tmp_path)
     result2, _state = _run(llm=llm2, state=state)
-    output2 = _validate(result2.body)
+    output2 = _validate(result2)
     assert client2.calls == []  # §13: an immediate second run makes zero LLM calls
     assert all(t.cached for t in output2.repos[0].triage)
     assert output2.repos[0].changelog.cached is True
@@ -280,7 +317,7 @@ def test_a_failing_repo_is_skipped_not_fatal():
         return base_handler(request)
 
     result, _state = _run(config=_config(broken, REPO), handler=handler)
-    output = _validate(result.body)
+    output = _validate(result)
 
     assert [r.full_name for r in output.repos] == ["you/widgets"]
     assert "you/gone" in result.failed

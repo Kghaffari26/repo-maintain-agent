@@ -219,10 +219,10 @@ def test_deterministic_markdown_omits_empty_groups():
 # -- draft_changelog orchestration -----------------------------------------------
 
 
-def test_draft_changelog_with_no_llm_goes_straight_to_deterministic():
+def test_draft_changelog_with_no_llm_goes_straight_to_the_template():
     items = [ChangelogItem(ref="#1", title="fix: bug", labels=["bug"])]
     markdown, source = draft_changelog(items, "## [Unreleased]", draft_fn=None)
-    assert source == "deterministic"
+    assert source == "template"
     assert "### Fixed" in markdown
 
 
@@ -238,7 +238,7 @@ def test_draft_changelog_accepts_llm_output_on_first_try():
     assert "(#1)" in markdown
 
 
-def test_draft_changelog_retries_once_then_falls_back_to_deterministic():
+def test_draft_changelog_retries_once_then_falls_back_to_the_template():
     items = [ChangelogItem(ref="#1", title="A", labels=["bug"])]
     calls = []
 
@@ -250,7 +250,7 @@ def test_draft_changelog_retries_once_then_falls_back_to_deterministic():
     assert len(calls) == 2  # one retry, per §7.3
     assert calls[0] is None
     assert calls[1] is not None and calls[1].ok is False
-    assert source == "deterministic"
+    assert source == "template"
     assert "### Fixed" in markdown
 
 
@@ -360,7 +360,7 @@ def test_retry_prompt_lists_missing_and_extra_refs(tmp_path):
 def test_no_items_means_no_model_call(tmp_path):
     llm, client = fake_llm([], tmp_path)
     markdown, source = draft_changelog([], "## Unreleased", draft_fn=make_draft_fn(llm))
-    assert source == "deterministic"
+    assert source == "template"
     assert client.calls == []
 
 
@@ -378,7 +378,7 @@ def test_model_failure_falls_back_without_caching_the_fallback(tmp_path):
         draft_fn=make_draft_fn(llm),
     )
 
-    assert result.narrative_source == "deterministic"
+    assert result.narrative_source == "template"
     assert "(#1)" in result.markdown
     assert result.cacheable is False
 
@@ -397,7 +397,7 @@ def test_guard_failing_twice_is_cached_as_the_final_draft(tmp_path):
         draft_fn=make_draft_fn(llm),
     )
 
-    assert result.narrative_source == "deterministic"
+    assert result.narrative_source == "template"
     assert result.cacheable is True
 
 
@@ -408,3 +408,23 @@ def test_dry_run_draft_is_not_cacheable():
         base=base, items=items, content_source="pull_requests", version_heading="## X", cache=None
     )
     assert result.cacheable is False
+
+
+def test_old_deterministic_cache_entries_read_back_as_template():
+    items = [ChangelogItem(ref="#1", title="Fix crash", labels=["bug"], merged_at=NOW)]
+    base = BaseRef(ref="v1.0.0", date=NOW, source="tag", is_semver=True)
+    cache = {
+        "base_ref": "v1.0.0",
+        "pr_set_hash": pr_set_hash(items),
+        "prompt_version": PROMPT_VERSION,
+        "markdown": "## x\n",
+        "narrative_source": "deterministic",
+    }
+    result = build_changelog(
+        base=base,
+        items=items,
+        content_source="pull_requests",
+        version_heading="## x",
+        cache=cache,
+    )
+    assert result.cached and result.narrative_source == "template"

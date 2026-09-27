@@ -14,7 +14,7 @@ window regardless of state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -29,18 +29,6 @@ class RepoUnavailable(RuntimeError):
 
 RECENT_ACTIVITY_WEEKS = 12
 CLOSED_ISSUES_DUP_WINDOW_DAYS = 180
-
-
-@dataclass
-class RepoEtags:
-    """Per-repo ETags carried in state.json, one per cached list endpoint."""
-
-    meta: str | None = None
-    labels: str | None = None
-    issues_open: str | None = None
-    issues_recent: str | None = None
-    issues_closed: str | None = None
-    pulls_open: str | None = None
 
 
 @dataclass
@@ -61,7 +49,6 @@ class RepoSnapshot:
     merged_prs_since_base: list[dict[str, Any]]
     compare_commits: list[dict[str, Any]]
     community_profile: dict[str, Any] | None
-    etags: RepoEtags = field(default_factory=RepoEtags)
     partial: bool = False
 
 
@@ -75,12 +62,11 @@ def fetch_repo(
     repo: RepoConfig,
     *,
     now: datetime,
-    prior_etags: RepoEtags | None = None,
 ) -> RepoSnapshot:
     """Fetch everything §3 lists for one repo, degrading to ``partial=True``
-    under the rate-limit guard instead of raising."""
+    under the rate-limit guard instead of raising. The metadata and list reads
+    that repeat every run are conditional (``cache_key``, see ``gh.GitHubClient``)."""
     owner, repo_name = _owner_repo(repo.full_name)
-    etags = prior_etags or RepoEtags()
     partial = False
 
     def safe(fn):
@@ -93,60 +79,50 @@ def fetch_repo(
             partial = True
             return None
 
-    meta_page = safe(lambda: client.get_json(f"/repos/{owner}/{repo_name}", etag=etags.meta))
+    meta_page = safe(lambda: client.get_json(f"/repos/{owner}/{repo_name}", cache_key="meta"))
     meta = (meta_page.items[0] if meta_page and meta_page.items else {}) or {}
     if meta_page is not None and not meta:
         # 404: the repo doesn't exist or this token can't see it. Every other
         # endpoint would 404 too and read as a healthy, empty repo -- fail it instead.
         raise RepoUnavailable(f"{repo.full_name}: not found or not accessible with its token")
-    if meta_page and meta_page.etag:
-        etags.meta = meta_page.etag
     default_branch = meta.get("default_branch", "main")
 
     labels_page = safe(
-        lambda: client.paginate(f"/repos/{owner}/{repo_name}/labels", etag=etags.labels)
+        lambda: client.paginate(f"/repos/{owner}/{repo_name}/labels", cache_key="labels")
     )
     labels = {label["name"] for label in (labels_page.items if labels_page else [])}
-    if labels_page and labels_page.etag:
-        etags.labels = labels_page.etag
 
     open_issues_page = safe(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/issues",
-            etag=etags.issues_open,
+            cache_key="issues_open",
             params={"state": "open", "sort": "updated"},
         )
     )
     open_items = open_issues_page.items if open_issues_page else []
     open_issues = [i for i in open_items if "pull_request" not in i]
-    if open_issues_page and open_issues_page.etag:
-        etags.issues_open = open_issues_page.etag
 
     since_12w = (now - timedelta(weeks=RECENT_ACTIVITY_WEEKS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     recent_page = safe(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/issues",
-            etag=etags.issues_recent,
+            cache_key="issues_recent",
             params={"state": "all", "since": since_12w, "sort": "updated"},
         )
     )
     recent_activity = recent_page.items if recent_page else []
-    if recent_page and recent_page.etag:
-        etags.issues_recent = recent_page.etag
 
     since_180d_dt = now - timedelta(days=CLOSED_ISSUES_DUP_WINDOW_DAYS)
     since_180d = since_180d_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     closed_page = safe(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/issues",
-            etag=etags.issues_closed,
+            cache_key="issues_closed",
             params={"state": "closed", "since": since_180d, "sort": "updated"},
         )
     )
     closed_items = closed_page.items if closed_page else []
     closed_issues_180d = [i for i in closed_items if "pull_request" not in i]
-    if closed_page and closed_page.etag:
-        etags.issues_closed = closed_page.etag
 
     comments_by_number: dict[int, list[dict[str, Any]]] = {}
     for issue in open_issues:
@@ -160,13 +136,11 @@ def fetch_repo(
     open_prs_page = safe(
         lambda: client.paginate(
             f"/repos/{owner}/{repo_name}/pulls",
-            etag=etags.pulls_open,
+            cache_key="pulls_open",
             params={"state": "open", "sort": "updated", "direction": "desc"},
         )
     )
     open_prs = open_prs_page.items if open_prs_page else []
-    if open_prs_page and open_prs_page.etag:
-        etags.pulls_open = open_prs_page.etag
 
     pr_reviews: dict[int, list[dict[str, Any]]] = {}
     pr_check_runs: dict[str, list[dict[str, Any]]] = {}
@@ -222,7 +196,6 @@ def fetch_repo(
         merged_prs_since_base=[],  # filled in by fetch_merged_prs_since once base is known (§5.5)
         compare_commits=[],
         community_profile=community_profile,
-        etags=etags,
         partial=partial,
     )
 

@@ -1,17 +1,15 @@
 # SPEC_REPO_MAINT.md §8.6, §10: two least-privilege jobs, one per mode, both
-# delegating the run itself to the agents-core reusable workflow (which runs
-# `agents-run repo_maint`, commits data/ back to this branch, force-pushes
-# public-data/ to the `data` branch, and notifies the site repo).
+# delegating the run itself to the agents-core reusable workflow. run-agent.yml
+# (>= v0.2.0) declares no permissions of its own, so each job below grants exactly
+# what its run may use: `contents: write` always (it commits data/ back and
+# force-pushes public-data/ to the `data` branch), `issues: write` only in apply
+# mode (labels + one triage comment), read-only everything else. It restores the
+# `data` branch into public-data/ before the run, passes GITHUB_TOKEN,
+# REPO_MAINT_TOKEN and APPLY_CHANGES to the agent, and publishes trace.json.
 #
-# KNOWN LIMITS of run-agent.yml@v0.1.0 (see DECISIONS.md and STATUS.md,
-# "Needed from agents-core"):
-#   - Its own top-level `permissions: contents: write` caps GITHUB_TOKEN inside
-#     the called workflow, so the per-job `issues:`/`pull-requests:` grants below
-#     are declared (and are the ceiling) but can't reach the agent step.
-#   - Its agent step's env only forwards ANTHROPIC_API_KEY (+ FRED/SAM/CENSUS
-#     keys): not GITHUB_TOKEN, REPO_MAINT_TOKEN or APPLY_CHANGES. Until it does,
-#     every repo fails with "GITHUB_TOKEN is not set" and the scheduled run fails
-#     loudly; and apply mode can never pass gate 2 (§8.1), so it fails closed.
+# The sandbox's fix proposals (draft PRs, §6.1) are written with REPO_MAINT_TOKEN, a
+# fine-grained PAT scoped to the sandbox repo only, never with this run's token, so
+# neither job grants pull-requests: write.
 name: Repo maintenance agent
 
 on:
@@ -31,59 +29,40 @@ concurrency:
 permissions: {}
 
 jobs:
-  # The reusable workflow splices extra_args into a shell command, so the free-text
-  # dispatch input is validated here (never interpolated into a script) first.
-  validate:
-    name: Validate inputs
-    runs-on: ubuntu-latest
-    permissions: {}
-    outputs:
-      extra_args: ${{ steps.args.outputs.extra_args }}
-    steps:
-      - id: args
-        env:
-          REPOS: ${{ inputs.repos }}
-        run: |
-          set -euo pipefail
-          if [ -z "${REPOS:-}" ]; then
-            echo "extra_args=" >> "$GITHUB_OUTPUT"
-          elif [[ "$REPOS" =~ ^[A-Za-z0-9._/,-]+$ ]]; then
-            echo "extra_args=--repos $REPOS" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::repos may only contain owner/name pairs separated by commas"
-            exit 1
-          fi
-
   report:
     name: Report (read-only)
-    needs: validate
     if: vars.APPLY_CHANGES != 'true'
     permissions:
       contents: write
       issues: read
       pull-requests: read
-    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.1.0
+      checks: read
+    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.3.0
     with:
       agent: repo_maint
-      max_run_usd: "0.25"
+      max_run_usd: "0.40"
       site_repo: Kghaffari26/agents-hub
-      extra_args: ${{ needs.validate.outputs.extra_args }}
+      # Split on whitespace and passed as arguments, never shell-evaluated
+      # (run-agent.yml >= v0.2.0); the agent rejects repos not in its config.
+      extra_args: ${{ inputs.repos && format('--repos {0}', inputs.repos) || '' }}
     secrets: inherit
 
   apply:
     name: Apply (labels + one triage comment per eligible issue)
-    needs: validate
     if: vars.APPLY_CHANGES == 'true'
     permissions:
       contents: write
       issues: write
       pull-requests: read
-    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.1.0
+      checks: read
+    uses: Kghaffari26/agents-core/.github/workflows/run-agent.yml@v0.3.0
     with:
       agent: repo_maint
-      max_run_usd: "0.25"
+      max_run_usd: "0.40"
       site_repo: Kghaffari26/agents-hub
-      # --apply is gate 1 of 5 (§8.1). Gates 2-5 (APPLY_CHANGES env, allow_apply,
-      # role own/sandbox, a write token) are checked per repo in code.
-      extra_args: --apply ${{ needs.validate.outputs.extra_args }}
+      # --apply is gate 1 and APPLY_CHANGES=true gate 2 of 5 (§8.1). Gates 3-5
+      # (allow_apply, role own/sandbox, a write token) are checked per repo in code;
+      # fix-proposal PRs additionally need allow_fix_prs = true (§6.1).
+      apply_changes: true
+      extra_args: --apply ${{ inputs.repos && format('--repos {0}', inputs.repos) || '' }}
     secrets: inherit

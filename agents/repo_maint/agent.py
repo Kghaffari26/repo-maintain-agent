@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from agents_core.agent import Agent, AgentResult, RunContext
-from agents_core.llm import tier_config
+from agents_core.http import HostPolicy, Http
+from agents_core.llm import LLM, tier_config
 from agents_core.schema import Source
 
 from agents.repo_maint import changelog as changelog_mod
@@ -35,6 +36,17 @@ log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("config/repos.toml")
 STATE_PATH = Path("data/repo_maint/state.json")
+
+#: A backstop on GitHub requests actually sent per UTC day (agents-core HostPolicy),
+#: on top of §3's rate-limit floor. A full 6-repo run sends ~50-100.
+GITHUB_HOST = "api.github.com"
+GITHUB_DAILY_REQUEST_CAP = 2000
+GITHUB_MAX_ATTEMPTS = 3
+
+NO_KEY_WARNING = (
+    "ANTHROPIC_API_KEY is not set: issues were left untriaged (unscored) and changelogs"
+    " use the template grouping"
+)
 
 #: `--repos a/b,c/d` (forwarded by agents-run as an extra arg) narrows a run, §10.
 REPOS_FLAG = "--repos"
@@ -52,6 +64,22 @@ def repos_filter(extra_args: list[str]) -> set[str] | None:
             names = {v.strip() for v in value.split(",") if v.strip()}
             return names or None
     return None
+
+
+def llm_available(llm: LLM) -> bool:
+    """False when no Anthropic key is configured (``LLM.client`` can't be built), so
+    the run publishes template/unscored output with a warning instead of crashing."""
+    try:
+        llm.client  # noqa: B018 - builds the SDK client, raising without a key
+    except RuntimeError:
+        return False
+    return True
+
+
+def github_cache_dir(state_path: Path, full_name: str) -> Path:
+    """Where one repo's conditional-read cache (``Http.download``) lives, next to
+    state.json so the workflow commits it back with the rest of ``data/``."""
+    return state_path.parent / "github" / full_name.replace("/", "__")
 
 
 @dataclass
@@ -78,7 +106,7 @@ def _fingerprint(body: dict[str, Any]) -> str:
             return {
                 k: strip(v)
                 for k, v in x.items()
-                if k not in {"meta", "generated_at", "cached", schema.META_EXTRA_KEY}
+                if k not in {"meta", "generated_at", "cached", "key_stats"}
             }
         if isinstance(x, list):
             return [strip(v) for v in x]
@@ -91,7 +119,7 @@ class RepoMaintAgent(Agent):
     id = "repo_maint"
     name = "Repo Maintenance Agent"
     route = "/repos"
-    schema_version = "1.0.0"
+    schema_version = "1.1.0"
     expected_interval_hours = 24
     next_run_hint = "Daily 07:00 PT"
     history_keep = 90
@@ -99,6 +127,12 @@ class RepoMaintAgent(Agent):
 
     config_path: Path = CONFIG_PATH
     state_path: Path = STATE_PATH
+
+    def configure_http(self, http: Http) -> None:
+        http.set_policy(
+            GITHUB_HOST,
+            HostPolicy(daily_budget=GITHUB_DAILY_REQUEST_CAP, max_attempts=GITHUB_MAX_ATTEMPTS),
+        )
 
     # -- fetch: every GitHub read, no LLM ------------------------------------------------
 
@@ -118,7 +152,11 @@ class RepoMaintAgent(Agent):
         now = ctx.started_at
 
         def build_client(repo: RepoConfig) -> GitHubClient:
-            return GitHubClient(ctx.http, resolve_token(repo.token))
+            return GitHubClient(
+                ctx.http,
+                resolve_token(repo.token),
+                cache_dir=github_cache_dir(self.state_path, repo.full_name),
+            )
 
         repos, failed = pipeline.fetch_all(config, state, build_client, now)
         return Fetched(config=config, state=state, now=now, repos=repos, failed=failed)
@@ -158,12 +196,16 @@ class RepoMaintAgent(Agent):
 
     def analyze(self, ctx: RunContext, data: Computed) -> AgentResult:
         fetched = data.fetched
+        use_llm = llm_available(ctx.llm)
+        if not use_llm:
+            ctx.warn(NO_KEY_WARNING)
 
         def classify_factory(
             repo: RepoConfig, description: str | None, labels: set[str]
         ) -> triage_mod.ClassifyFn:
             return triage_mod.make_classify_fn(ctx.llm, repo, description, labels)
 
+        previous = ctx.previous_latest()
         result = pipeline.finish_all(
             data.works,
             fetched.config,
@@ -172,13 +214,13 @@ class RepoMaintAgent(Agent):
             failed=fetched.failed,
             apply_flag=ctx.apply,
             apply_changes_env=os.environ.get("APPLY_CHANGES"),
-            classify_factory=classify_factory,
-            draft_fn=changelog_mod.make_draft_fn(ctx.llm),
+            classify_factory=classify_factory if use_llm else None,
+            draft_fn=changelog_mod.make_draft_fn(ctx.llm) if use_llm else None,
             draft_model=tier_config("smart").model,
+            previous_stats=pipeline.previous_key_stats(previous),
         )
         save_state(self.state_path, fetched.state)
 
-        previous = ctx.previous_latest()
         data_changed = previous is None or _fingerprint(previous) != _fingerprint(result.body)
         retrieved_at = datetime.now(UTC)
         sources = [
@@ -192,6 +234,8 @@ class RepoMaintAgent(Agent):
             key_stats=[schema.KeyStat.model_validate(k) for k in result.body["key_stats"]],
             data_changed=data_changed,
             items_count=len(result.repo_entries),
+            warnings=result.warnings,
+            meta_fields=result.meta_fields,
         )
 
 
