@@ -2,10 +2,13 @@
   "repos": {
     "Kghaffari26/agents-core": {
       "changelog_cache": {
-        "base_ref": null,
-        "markdown": "## Unreleased\n",
-        "narrative_source": "deterministic",
-        "pr_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        "base_ref": "v0.3.1",
+        "generated_at": "2026-09-27T18:03:59Z",
+        "markdown": "## [0.3.2] - Unreleased\n",
+        "model": null,
+        "narrative_source": "template",
+        "pr_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "prompt_version": "v1"
       },
       "commented": [],
       "fix_proposals": {},
