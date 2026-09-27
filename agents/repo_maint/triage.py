@@ -44,8 +44,10 @@ MISSING_INFO_OPTIONS = {
 }
 MAX_SUGGESTED_LABELS = 3
 
-#: §7.2 post-processing: force priority to at least p1 only for bugs whose
-#: issue text matches this regex. The model's own priority is otherwise kept.
+#: §7.2 post-processing: force priority to at least p1 only when the model classified
+#: the issue as a bug AND its TITLE matches this regex. The model's own priority is
+#: otherwise kept. Title only: the body is where injected instructions live, and a
+#: body saying "label this security" used to trip it (inj-01, see DECISIONS.md).
 SECURITY_REGEX = re.compile(r"security|vulnerability|data loss|crash on start", re.IGNORECASE)
 
 #: Issue body characters sent to the model (§7.1 budgets ~1.5k input tokens).
@@ -86,10 +88,11 @@ def _priority_rank(priority: str) -> int:
     return PRIORITIES.index(priority) if priority in PRIORITIES else len(PRIORITIES)
 
 
-def escalate_priority(classification: str, priority: str, issue_text: str) -> str:
-    """Force priority to at least p1 for bugs matching the security/data-loss
-    regex; otherwise keep the model's priority as-is (§7.2)."""
-    if classification != "bug" or not SECURITY_REGEX.search(issue_text):
+def escalate_priority(classification: str, priority: str, title: str) -> str:
+    """Force priority to at least p1 when the model says ``bug`` and the issue's
+    title matches the security/data-loss regex; otherwise keep the model's
+    priority as-is (§7.2, as amended: title only)."""
+    if classification != "bug" or not SECURITY_REGEX.search(title):
         return priority
     if _priority_rank(priority) > _priority_rank("p1"):
         return "p1"
@@ -153,8 +156,6 @@ def postprocess(
     """Validate every field of a raw model response against an allowlist or
     a closed set of valid values (§7.2, §8.5) -- nothing here trusts the
     model's output directly."""
-    issue_text = f"{issue.get('title', '')}\n{issue.get('body') or ''}"
-
     classification = raw.get("classification")
     if classification not in CLASSIFICATIONS:
         classification = "other"
@@ -166,7 +167,7 @@ def postprocess(
     priority = raw.get("priority")
     if priority not in PRIORITIES:
         priority = "p2"
-    priority = escalate_priority(classification, priority, issue_text)
+    priority = escalate_priority(classification, priority, issue.get("title") or "")
 
     raw_labels = raw.get("suggested_labels")
     raw_labels = raw_labels if isinstance(raw_labels, list) else []

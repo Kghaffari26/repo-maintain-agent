@@ -67,7 +67,7 @@ def _pr(number, title, created_at, updated_at, draft=False):
     }
 
 
-def make_handler(on_request=None):
+def make_handler(on_request=None, commits=None):
     def handler(request: httpx.Request) -> httpx.Response:
         if on_request:
             on_request(request)
@@ -109,6 +109,9 @@ def make_handler(on_request=None):
             return httpx.Response(200, json={"check_runs": []}, headers=headers)
         if path == "/repos/you/widgets/releases/latest":
             return httpx.Response(404, json={"message": "Not Found"}, headers=headers)
+        if path == "/repos/you/widgets/commits":
+            assert request.url.params.get("sha") == "main" and request.url.params.get("since")
+            return httpx.Response(200, json=commits or [], headers=headers)
         if path == "/repos/you/widgets/tags":
             return httpx.Response(200, json=[], headers=headers)
         if path == "/repos/you/widgets/community/profile":
@@ -334,3 +337,33 @@ def test_the_run_fails_when_every_repo_fails():
         assert "every configured repo failed" in str(e)
     else:
         raise AssertionError("expected the run to fail")
+
+
+def _commit(sha, message, date):
+    return {
+        "sha": sha,
+        "commit": {"message": message, "author": {"name": "Dev", "date": date}},
+        "author": {"login": "dev"},
+    }
+
+
+def test_no_tags_and_no_merged_prs_builds_the_changelog_from_30_days_of_commits():
+    """§5.5: the 30-day base has no ref to compare from, so use the branch's commits."""
+    commits = [  # the commits API lists newest first
+        _commit("b" * 40, "fix: handle empty CSV", "2026-09-20T00:00:00Z"),
+        _commit("a" * 40, "feat: add export\n\nlong body", "2026-09-01T00:00:00Z"),
+    ]
+    since = []
+
+    def track(request: httpx.Request) -> None:
+        if request.url.path.endswith("/commits"):
+            since.append(request.url.params.get("since"))
+
+    result, _state = _run(handler=make_handler(track, commits=commits))
+    assert since == ["2026-08-25T00:00:00Z"]  # NOW - 30 days
+    changelog = _validate(result).repos[0].changelog
+    assert changelog.source == "commits"
+    assert changelog.base_ref is None and changelog.base_date == "2026-08-25"
+    assert changelog.item_count == 2
+    assert changelog.markdown.index("aaaaaaa") < changelog.markdown.index("bbbbbbb")
+    assert "### Added" in changelog.markdown and "### Fixed" in changelog.markdown

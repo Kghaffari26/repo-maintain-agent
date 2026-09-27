@@ -71,7 +71,12 @@ class RepoFetch:
     changelog_partial: bool
 
 
-def fetch_repo_data(repo: RepoConfig, client: GitHubClient, now: datetime) -> RepoFetch:
+def fetch_repo_data(
+    repo: RepoConfig,
+    client: GitHubClient,
+    now: datetime,
+    max_changelog_items: int = 80,
+) -> RepoFetch:
     """All GitHub reads for one repo (§3). Conditional reads keep their ETags and
     bodies in the client's ``cache_dir`` (agents-core ``Http.download``)."""
     snapshot = fetch_mod.fetch_repo(client, repo, now=now)
@@ -86,6 +91,11 @@ def fetch_repo_data(repo: RepoConfig, client: GitHubClient, now: datetime) -> Re
     )
     if not has_prs and base.ref:
         compare_commits = fetch_mod.fetch_compare_commits(client, repo, base.ref, default_branch)
+    elif not has_prs:
+        # No tag to compare from (§5.5's 30-day base): the branch's commits since then.
+        compare_commits = fetch_mod.fetch_commits_since(
+            client, repo, default_branch, base.date, max_changelog_items
+        )
     return RepoFetch(
         repo=repo,
         client=client,
@@ -624,7 +634,9 @@ def fetch_all(
     for repo in config.repo:
         try:
             client = build_client(repo)
-            fetched.append(fetch_repo_data(repo, client, now))
+            fetched.append(
+                fetch_repo_data(repo, client, now, config.settings.max_changelog_items)
+            )
         except REPO_FAILURES as e:
             log.error("%s: skipped this run: %s", repo.full_name, e)
             failed[repo.full_name] = str(e)

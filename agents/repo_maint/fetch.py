@@ -249,3 +249,24 @@ def fetch_compare_commits(
         return []
     body = page.items[0] if page.items else {}
     return (body or {}).get("commits", [])
+
+
+def fetch_commits_since(
+    client: GitHubClient, repo: RepoConfig, branch: str, since: datetime, max_items: int
+) -> list[dict[str, Any]]:
+    """Commits on ``branch`` since ``since``, oldest first, for the changelog when a
+    repo has no release/tag (so no ``compare`` base) and no merged PRs (§5.5: the
+    "last 30 days" base). One page of up to 100, which covers ``max_changelog_items``."""
+    owner, repo_name = _owner_repo(repo.full_name)
+    try:
+        page = client.get_json(
+            f"/repos/{owner}/{repo_name}/commits",
+            params={
+                "sha": branch,
+                "since": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "per_page": min(max(max_items, 1), 100),
+            },
+        )
+    except RateLimitLow:
+        return []
+    return list(reversed(page.items))
