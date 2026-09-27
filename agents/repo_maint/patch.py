@@ -86,14 +86,16 @@ def _clean_path(raw: str) -> str | None:
     return path
 
 
-def check_path(path: str) -> None:
+def check_path(path: str, *, for_write: bool = True) -> None:
+    """A repo-relative path with no traversal. ``for_write`` (patches) also refuses
+    ``.github/`` and ``.git/``; reading them is fine."""
     parts = path.split("/")
     if (
         not path
         or path.startswith("/")
         or "\\" in path
         or any(p in ("", ".", "..") for p in parts)
-        or path.startswith(_FORBIDDEN_PREFIXES)
+        or (for_write and path.startswith(_FORBIDDEN_PREFIXES))
     ):
         raise PatchError(f"path not allowed: {path!r}")
 

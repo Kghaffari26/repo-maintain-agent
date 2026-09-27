@@ -121,3 +121,11 @@ def test_parse_and_apply_file_patch_directly():
 def test_check_path_rejects(path):
     with pytest.raises(PatchError):
         check_path(path)
+
+
+def test_check_path_allows_reading_github_dir_but_not_writing_it():
+    check_path(".github/workflows/ci.yml", for_write=False)
+    with pytest.raises(PatchError):
+        check_path(".github/workflows/ci.yml")
+    with pytest.raises(PatchError):
+        check_path("../x", for_write=False)

@@ -438,3 +438,23 @@ def test_a_stopped_loop_is_published_and_warned_about(tmp_path):
     # an attempt at the same issue text isn't repeated next run
     result, client = _pipeline(tmp_path, state, [], writes=[])
     assert client.calls == [] and len(result.body["repos"][0]["fix_proposals"]) == 1
+
+
+def test_github_dir_is_readable_and_searchable_but_never_patchable(tmp_path, repo_copy):
+    workflow = repo_copy / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: ci\n")
+    ci_diff = "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1 +1 @@\n-name: ci\n+name: pwned\n"  # noqa: E501
+    script = [
+        turn(
+            tool_use("search_code", query="def paginate"),
+            tool_use("read_file", path=".github/workflows/ci.yml"),
+            tool_use("propose_patch", diff=ci_diff, rationale="x"),
+        ),
+        turn(tool_use("finish", outcome="no_fix", summary="Nothing to do.")),
+    ]
+    run_, _ = _run_loop(tmp_path, fp.LocalRepoSource(repo_copy), script)
+    search, read, patch = run_.loop.tool_calls
+    assert not search.is_error and "ledgerlite/pagination.py" in search.output
+    assert not read.is_error and "name: ci" in read.output
+    assert patch.is_error and "path not allowed" in patch.output

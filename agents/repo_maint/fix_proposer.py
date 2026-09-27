@@ -110,7 +110,7 @@ class LocalRepoSource:
         )
 
     def read(self, path: str) -> str | None:
-        patch_mod.check_path(path)
+        patch_mod.check_path(path, for_write=False)
         target = self.root / path
         return target.read_text() if target.is_file() else None
 
@@ -141,7 +141,7 @@ class GitHubRepoSource:
         return self._paths
 
     def read(self, path: str) -> str | None:
-        patch_mod.check_path(path)
+        patch_mod.check_path(path, for_write=False)
         if path not in self._files:
             page = self.client.get_json(
                 f"/repos/{self.owner}/{self.repo}/contents/{path}", params={"ref": self.ref}
@@ -248,7 +248,10 @@ def build_tools(source: RepoSource, state: LoopState) -> list[Any]:
         needle = args.query.lower()
         hits: list[str] = []
         for path in [p for p in source.list_paths() if _is_text(p)][:MAX_SEARCH_FILES]:
-            content = source.read(path) or ""
+            try:
+                content = source.read(path) or ""
+            except patch_mod.PatchError:
+                continue
             for n, line in enumerate(content.splitlines(), 1):
                 if needle in line.lower():
                     hits.append(f"{path}:{n}: {line.strip()[:200]}")
