@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from agents.repo_maint.config import (
     RepoConfig,
+    approve_fix_pr,
     check_write_gates,
     load_config,
 )
@@ -189,3 +190,46 @@ def test_write_gates_reject_own_role_without_allow_apply():
     )
     assert result.passed is False
     assert any("allow_apply" in reason for reason in result.reasons)
+
+
+# -- the fix-PR gate (§6.1) ----------------------------------------------------------
+
+
+def test_allow_fix_prs_is_sandbox_only_and_fails_to_load_otherwise():
+    for role in ("own", "public_demo"):
+        with pytest.raises(ValidationError, match="allow_fix_prs"):
+            RepoConfig(full_name="o/r", role=role, allow_fix_prs=True)
+    assert RepoConfig(full_name="o/r", role="sandbox", allow_fix_prs=True).allow_fix_prs
+
+
+def _fix_repo(**overrides) -> RepoConfig:
+    fields = {"full_name": "o/sandbox", "role": "sandbox", "allow_apply": True}
+    return RepoConfig(**{**fields, "allow_fix_prs": True, **overrides})
+
+
+def _gates(repo: RepoConfig, **overrides):
+    kwargs = {"apply_flag": True, "apply_changes_env": "true", "token_available": True}
+    return check_write_gates(repo, **{**kwargs, **overrides})
+
+
+def test_approve_fix_pr_needs_all_five_gates_the_flag_and_a_human_approval():
+    repo = _fix_repo()
+    ok = approve_fix_pr(
+        repo, "abc123abc123", write_gates=_gates(repo), human_approved_ids={"abc123abc123"}
+    )
+    assert ok.passed and ok.repo == "o/sandbox" and ok.proposal_id == "abc123abc123"
+
+    cases = [
+        (repo, {"apply_flag": False}, {"abc123abc123"}, "--apply"),
+        (repo, {"apply_changes_env": "false"}, {"abc123abc123"}, "APPLY_CHANGES"),
+        (repo, {"token_available": False}, {"abc123abc123"}, "token"),
+        (_fix_repo(allow_apply=False), {}, {"abc123abc123"}, "allow_apply"),
+        (_fix_repo(allow_fix_prs=False), {}, {"abc123abc123"}, "allow_fix_prs"),
+        (repo, {}, set(), "approved by a human"),
+        (repo, {}, {"000000000000"}, "approved by a human"),
+    ]
+    for r, gate_overrides, approved, reason in cases:
+        result = approve_fix_pr(
+            r, "abc123abc123", write_gates=_gates(r, **gate_overrides), human_approved_ids=approved
+        )
+        assert not result.passed and any(reason in x for x in result.reasons), reason

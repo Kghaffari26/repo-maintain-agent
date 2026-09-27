@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import ast
+import base64
 import inspect
+import json
 
 import httpx
 import pytest
 
 from agents.repo_maint import gh
+from agents.repo_maint.config import FixPRApproval
 from tests.repo_maint.fakes import gh_client
 
 
@@ -322,9 +325,10 @@ def test_default_headers_includes_bearer_token():
 # -- introspection: no write methods beyond the two allowed (§8.2, §11) -----
 
 
-def test_only_two_write_methods_exist():
+def test_only_three_write_methods_exist():
     """Statically verify no code path issues a non-GET request outside
-    ``add_labels``/``add_comment``, so the client can't express any other write."""
+    ``add_labels``/``add_comment``/``create_draft_pr``, so the client can't express
+    any other write."""
     write_verbs = {"POST", "PUT", "PATCH", "DELETE"}
     source = inspect.getsource(gh)
     tree = ast.parse(source)
@@ -342,12 +346,12 @@ def test_only_two_write_methods_exist():
             if isinstance(first_arg, ast.Constant) and first_arg.value in write_verbs:
                 functions_with_writes.add(node.name)
 
-    assert functions_with_writes == {"add_labels", "add_comment"}
+    assert functions_with_writes == {"add_labels", "add_comment", "create_draft_pr"}
 
 
 def test_github_client_has_no_other_public_write_looking_methods():
     """Belt-and-braces: the only public methods with write-suggestive names
-    are the two allowed writes."""
+    are the three allowed writes."""
     write_ish_prefixes = ("add", "create", "post", "update", "delete", "remove", "close", "merge")
     public_methods = [
         name
@@ -359,7 +363,23 @@ def test_github_client_has_no_other_public_write_looking_methods():
         for name in public_methods
         if name.startswith(write_ish_prefixes) and name != "close"
     }
-    assert write_ish == {"add_labels", "add_comment"}
+    assert write_ish == {"add_labels", "add_comment", "create_draft_pr"}
+
+
+def test_only_create_draft_pr_is_marked_requires_approval():
+    marked = {
+        name
+        for name in dir(gh.GitHubClient)
+        if getattr(getattr(gh.GitHubClient, name), "requires_approval", False)
+    }
+    assert marked == {"create_draft_pr"}
+
+
+def test_nothing_in_gh_can_merge_or_enable_auto_merge():
+    source = inspect.getsource(gh).lower()
+    for forbidden in ("/merge", "automerge", "auto_merge", "enablepullrequestautomerge", "graphql"):
+        assert forbidden not in source, forbidden
+    assert '"draft": true' in source
 
 
 def test_gh_module_does_not_implement_its_own_networking():
@@ -372,3 +392,94 @@ def test_gh_module_does_not_implement_its_own_networking():
     assert "httpx.Client" not in source
     assert "time.sleep" not in source
     assert "urllib" not in source
+
+
+# -- create_draft_pr (§6.1) -------------------------------------------------------
+
+
+def _draft_pr(**overrides) -> gh.DraftPR:
+    fields = {
+        "proposal_id": "abc123def456",
+        "base_branch": "main",
+        "base_sha": "f" * 40,
+        "head_branch": "repo-maint/fix-3-abc123de",
+        "title": "Draft fix for #3",
+        "body": f"> {gh.DRAFT_PR_BANNER}\n\nRelated issue: #3",
+        "files": (
+            gh.FileChange("ledgerlite/pagination.py", "fixed\n", "b" * 40),
+            gh.FileChange("tests/test_new.py", "new\n", None),
+        ),
+    }
+    return gh.DraftPR(**{**fields, **overrides})
+
+
+def _approval(passed=True, repo="o/sandbox", proposal_id="abc123def456"):
+    return FixPRApproval(repo=repo, proposal_id=proposal_id, passed=passed)
+
+
+@pytest.mark.parametrize(
+    "approval",
+    [
+        None,
+        _approval(passed=False),
+        _approval(repo="o/other"),
+        _approval(proposal_id="000000000000"),
+    ],
+)
+def test_create_draft_pr_refuses_without_a_matching_passing_approval(approval):
+    requests = []
+    client = _client(lambda r: requests.append(r) or httpx.Response(201, json={}))
+    with pytest.raises(PermissionError):
+        client.create_draft_pr("o", "sandbox", _draft_pr(), approval)
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"head_branch": "main"},
+        {"body": "no banner here"},
+        {"files": ()},
+    ],
+)
+def test_create_draft_pr_refuses_malformed_proposals(overrides):
+    requests = []
+    client = _client(lambda r: requests.append(r) or httpx.Response(201, json={}))
+    with pytest.raises(ValueError):
+        client.create_draft_pr("o", "sandbox", _draft_pr(**overrides), _approval())
+    assert requests == []
+
+
+def test_create_draft_pr_opens_a_draft_from_a_new_branch():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, json.loads(request.content or b"{}")))
+        if request.url.path.endswith("/pulls"):
+            return httpx.Response(201, json={"number": 7, "html_url": "https://x/pull/7"})
+        return httpx.Response(201, json={})
+
+    result = _client(handler).create_draft_pr("o", "sandbox", _draft_pr(), _approval())
+
+    assert result["number"] == 7
+    assert [(m, p) for m, p, _ in seen] == [
+        ("POST", "/repos/o/sandbox/git/refs"),
+        ("PUT", "/repos/o/sandbox/contents/ledgerlite/pagination.py"),
+        ("PUT", "/repos/o/sandbox/contents/tests/test_new.py"),
+        ("POST", "/repos/o/sandbox/pulls"),
+    ]
+    assert seen[0][2] == {"ref": "refs/heads/repo-maint/fix-3-abc123de", "sha": "f" * 40}
+    update, create = seen[1][2], seen[2][2]
+    assert update["sha"] == "b" * 40 and "sha" not in create
+    assert update["branch"] == create["branch"] == "repo-maint/fix-3-abc123de"
+    assert base64.b64decode(update["content"]).decode() == "fixed\n"
+    pr = seen[3][2]
+    assert pr["draft"] is True and pr["base"] == "main"
+    assert pr["head"] == "repo-maint/fix-3-abc123de"
+    assert gh.DRAFT_PR_BANNER in pr["body"]
+
+
+def test_create_draft_pr_raises_on_error_status():
+    client = _client(lambda r: httpx.Response(422, json={"message": "Reference already exists"}))
+    with pytest.raises(gh.GitHubRequestError):
+        client.create_draft_pr("o", "sandbox", _draft_pr(), _approval())

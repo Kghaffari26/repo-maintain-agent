@@ -16,7 +16,11 @@ those endpoints directly and is never imported by anything under
 runs when a human invokes it with ``--confirm`` against a repo configured as
 ``role = "sandbox"``. The sandbox repo doesn't exist yet.
 
-What it creates, per §13:
+What it creates, per §13 and §6.1:
+  - the ``ledgerlite`` package from ``scripts/sandbox_package/`` (a small Python
+    package with 5 deliberate, realistic bugs), committed file by file;
+  - 5 issues reporting those bugs, with repro steps (``build_fixable_bugs``) --
+    what the fix proposer is for;
   - ~25 issues: bugs with repro steps, bugs without repro steps, feature
     requests, questions, 3 issues forming intentional near-duplicate pairs,
     and 1 prompt-injection attempt (for the injection-resistance eval).
@@ -34,6 +38,7 @@ and refuses to target any repo whose ``role`` in config/repos.toml is not
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 import time
 from dataclasses import dataclass
@@ -55,7 +60,12 @@ SEED_ISSUE_KINDS = (
     "question",
     "duplicate",
     "injection",
+    "bug_fixable",
 )
+
+#: The small Python package the sandbox repo holds (uploaded by ``upload_package``);
+#: also the fixture repo of the fix-proposer trajectory evals.
+PACKAGE_DIR = Path(__file__).resolve().parent / "sandbox_package"
 
 
 @dataclass
@@ -240,6 +250,89 @@ def build_issues() -> list[SeedIssue]:
     return issues
 
 
+@dataclass
+class FixableBug:
+    """One of the sandbox package's deliberate bugs, and the issue that reports it.
+    ``eval_id`` names the fix-proposer eval case (and its hidden check test in
+    ``evals/repo_maint/fix_fixtures/checks/``)."""
+
+    eval_id: str
+    module: str
+    issue: SeedIssue
+
+
+def build_fixable_bugs() -> list[FixableBug]:
+    """5 small, real bugs in ``sandbox_package/ledgerlite`` with issues a user would
+    plausibly file (§6.1: what the fix proposer is for)."""
+
+    def bug(eval_id: str, module: str, title: str, body: str) -> FixableBug:
+        return FixableBug(eval_id, module, SeedIssue(title=title, body=body, kind="bug_fixable"))
+
+    return [
+        bug(
+            "fix-01",
+            "ledgerlite/money.py",
+            "Importing a CSV fails on amounts of 1,000 or more",
+            "My bank exports amounts with a thousands separator. Any row over a thousand "
+            "dollars makes the import stop.\n\n**Steps to reproduce**\n"
+            "```python\nfrom ledgerlite.money import parse_amount\n"
+            'parse_amount("1,234.50")\n```\n\n**Expected:** `Decimal("1234.50")`\n'
+            "**Actual:** `ValueError: not an amount: '1,234.50'`\n\n"
+            "Version 0.1.0, Python 3.12, macOS.",
+        ),
+        bug(
+            "fix-02",
+            "ledgerlite/dates.py",
+            "December summary crashes with 'month must be in 1..12'",
+            "Running the monthly summary for December blows up; every other month works."
+            "\n\n**Steps to reproduce**\n```python\nfrom ledgerlite.dates import month_bounds"
+            "\nmonth_bounds(2025, 12)\n```\n\n**Expected:** "
+            "`(date(2025, 12, 1), date(2025, 12, 31))`\n**Actual:** "
+            "`ValueError: month must be in 1..12`\n\nVersion 0.1.0.",
+        ),
+        bug(
+            "fix-03",
+            "ledgerlite/pagination.py",
+            "First page of the transaction list skips the first 10 rows",
+            "Page 1 of the transaction list starts at the 11th transaction, so the first ten "
+            "never show up anywhere.\n\n**Steps to reproduce**\n```python\n"
+            "from ledgerlite.pagination import paginate\npaginate(list(range(25)), page=1)\n"
+            "```\n\n**Expected:** `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`\n"
+            "**Actual:** `[10, 11, ..., 19]`, and page 3 is empty.\n\nVersion 0.1.0.",
+        ),
+        bug(
+            "fix-04",
+            "ledgerlite/stats.py",
+            "Monthly summary crashes for a month with no transactions",
+            "If I ask for the summary of a month where I have no transactions (say I was "
+            "travelling), it crashes instead of showing zeros.\n\n**Steps to reproduce**\n"
+            "```python\nfrom ledgerlite.report import monthly_summary\n"
+            'monthly_summary([], "2026-01")\n```\n\n**Expected:** '
+            '`{"ALL": "0.00 (avg 0.00)"}`\n**Actual:** `decimal.InvalidOperation` from '
+            "`average()`.\n\nVersion 0.1.0, Python 3.12.",
+        ),
+        bug(
+            "fix-05",
+            "ledgerlite/text.py",
+            "Export file names get double hyphens",
+            "Category names with more than one space, or with punctuation, produce ugly "
+            "export file names.\n\n**Steps to reproduce**\n```python\n"
+            'from ledgerlite.text import slugify\nslugify("Eating  Out & Bars")\n```\n\n'
+            '**Expected:** `"eating-out-bars"`\n**Actual:** `"eating--out--bars"`\n\n'
+            "Version 0.1.0.",
+        ),
+    ]
+
+
+def package_files() -> dict[str, str]:
+    """Every file of the sandbox package, by repo-relative path."""
+    return {
+        path.relative_to(PACKAGE_DIR).as_posix(): path.read_text()
+        for path in sorted(PACKAGE_DIR.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
 def build_prs() -> list[SeedPR]:
     """3 PRs per §13, one left stale with changes requested."""
     return [
@@ -306,6 +399,24 @@ def create_pr_branch(
     )
 
 
+def upload_package(http: Http, token: str, owner: str, repo: str) -> None:
+    """Commits the sandbox package, one file per Contents API PUT, to the default
+    branch of a freshly created (empty but initialized) sandbox repo."""
+    for path, content in package_files().items():
+        http.request(
+            "PUT",
+            f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}",
+            headers=default_headers(token),
+            json_body={
+                "message": f"Add {path}",
+                "content": base64.b64encode(content.encode()).decode(),
+            },
+            ttl_seconds=0,
+        )
+        print(f"  uploaded {path}")
+        time.sleep(0.5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/name of the sandbox repo")
@@ -323,11 +434,15 @@ def main() -> int:
     owner, repo = args.repo.split("/", 1)
     token = resolve_token(args.token_name)
 
-    issues = build_issues()
+    issues = build_issues() + [b.issue for b in build_fixable_bugs()]
     prs = build_prs()
-    print(f"About to create {len(issues)} issues and {len(prs)} PRs in {args.repo}.")
+    print(
+        f"About to upload {len(package_files())} package files and create {len(issues)} issues"
+        f" and {len(prs)} PRs in {args.repo}."
+    )
 
     with Http() as http:
+        upload_package(http, token, owner, repo)
         for issue in issues:
             create_issue(http, token, owner, repo, issue)
             time.sleep(0.5)  # be polite to the secondary rate limit

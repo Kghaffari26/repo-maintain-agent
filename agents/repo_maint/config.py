@@ -32,6 +32,10 @@ class Settings(BaseModel):
     max_changelog_items: int = 80
     max_writes_per_run: int = 15
     max_writes_per_repo_per_day: int = 10
+    # Fix proposer (§6.1): per run, per loop.
+    max_fix_proposals_per_run: int = 2
+    fix_loop_max_steps: int = 12
+    fix_loop_max_usd: float = 0.15
 
     model_config = {"extra": "forbid"}
 
@@ -66,6 +70,9 @@ class RepoConfig(BaseModel):
     full_name: str
     role: Role
     allow_apply: bool = False
+    # §6.1: lets the fix proposer run on this repo and, behind every write gate plus a
+    # human approval of the exact proposal, open a DRAFT pull request. Sandbox only.
+    allow_fix_prs: bool = False
     token: TokenName = "default"
     label_map: dict[str, str] = Field(default_factory=dict)
     priority_labels: dict[str, str] = Field(default_factory=dict)
@@ -81,6 +88,10 @@ class RepoConfig(BaseModel):
         if self.role == "public_demo" and self.allow_apply:
             raise ValueError(
                 f"{self.full_name}: allow_apply must be false for role 'public_demo'"
+            )
+        if self.allow_fix_prs and self.role != "sandbox":
+            raise ValueError(
+                f"{self.full_name}: allow_fix_prs is only allowed for role 'sandbox'"
             )
         return self
 
@@ -168,3 +179,45 @@ def check_write_gates(
     if not token_available:
         reasons.append(f"{repo.full_name}: no write-capable token available")
     return GateCheck(passed=not reasons, reasons=reasons)
+
+
+# -- the fix-PR gate (§6.1) ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixPRApproval:
+    """Proof that one proposal may become a draft PR: all five write gates passed,
+    the repo is a sandbox with ``allow_fix_prs``, and a human approved exactly this
+    proposal id. ``gh.GitHubClient.create_draft_pr`` refuses to run without one that
+    matches the repo and proposal. Only ``approve_fix_pr`` builds a passing one."""
+
+    repo: str
+    proposal_id: str
+    passed: bool
+    reasons: tuple[str, ...] = ()
+
+
+def approve_fix_pr(
+    repo: RepoConfig,
+    proposal_id: str,
+    *,
+    write_gates: GateCheck,
+    human_approved_ids: set[str],
+) -> FixPRApproval:
+    """The five §8.1 gates, plus ``allow_fix_prs``, role ``sandbox`` and a human
+    approval of this exact proposal id (``--approve-fix <id>``)."""
+    reasons = list(write_gates.reasons)
+    if not write_gates.passed and not reasons:
+        reasons.append("write gates did not pass")
+    if not repo.allow_fix_prs:
+        reasons.append(f"{repo.full_name}: allow_fix_prs is false")
+    if repo.role != "sandbox":
+        reasons.append(f"{repo.full_name}: fix PRs are only allowed on the sandbox")
+    if proposal_id not in human_approved_ids:
+        reasons.append(f"proposal {proposal_id} has not been approved by a human")
+    return FixPRApproval(
+        repo=repo.full_name,
+        proposal_id=proposal_id,
+        passed=not reasons,
+        reasons=tuple(reasons),
+    )

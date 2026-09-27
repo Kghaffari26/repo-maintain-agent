@@ -7,14 +7,18 @@ logging, per-host caps). Conditional reads (ETags) use agents-core's
 client's ``cache_dir`` and answers a 304 from there. Every other read passes
 ``ttl_seconds=0`` so agents-core's 6-hour dev cache never serves stale issue data.
 
-The client exposes **exactly two** write operations (``add_labels`` and
-``add_comment``). There are no other write endpoints here on purpose, so the
-rest of the agent cannot express any write the spec doesn't allow -- see
-``test_gh_client.py::test_only_two_write_methods_exist``.
+The client exposes **exactly three** write operations: ``add_labels`` and
+``add_comment`` (§8.2), and ``create_draft_pr`` (§6.1), which is marked
+``requires_approval`` and refuses to run without a passing
+``config.FixPRApproval`` for that exact proposal. There are no other write
+endpoints here on purpose, so the rest of the agent cannot express any write the
+spec doesn't allow -- see ``test_gh_client.py::test_only_three_write_methods_exist``.
+Nothing here can merge a pull request or enable auto-merge.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -24,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from agents_core.http import Http, HttpError
+
+from agents.repo_maint.config import FixPRApproval
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_ACCEPT = "application/vnd.github+json"
@@ -44,6 +50,41 @@ EMPTY_STATUSES = frozenset({404, 409})
 
 #: Conditional-read cache keys become file names under ``cache_dir``.
 _CACHE_KEY = re.compile(r"^[a-z0-9_]+$")
+
+
+#: Every fix-proposal branch starts with this, so they're recognizable and never
+#: collide with a human's branch.
+FIX_BRANCH_PREFIX = "repo-maint/fix-"
+#: Required at the top of every fix-proposal PR body.
+DRAFT_PR_BANNER = "Proposed by repo-maint agent; needs human review."
+
+
+def requires_approval[F](fn: F) -> F:
+    """Marks a write that needs a human's approval of the specific change, on top of
+    the five §8.1 write gates (checked in code and by the introspection tests)."""
+    fn.requires_approval = True  # type: ignore[attr-defined]
+    return fn
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """One file's full new content on the fix branch. ``blob_sha`` is the current
+    blob's sha (the Contents API needs it to update a file); None creates the file."""
+
+    path: str
+    content: str
+    blob_sha: str | None
+
+
+@dataclass(frozen=True)
+class DraftPR:
+    proposal_id: str
+    base_branch: str
+    base_sha: str
+    head_branch: str
+    title: str
+    body: str
+    files: tuple[FileChange, ...]
 
 
 class RateLimitLow(RuntimeError):
@@ -277,7 +318,7 @@ class GitHubClient:
             first = False
         return Page(items=all_items, etag=first_page_etag, not_modified=False)
 
-    # -- writes: the ONLY two write operations this client exposes --------
+    # -- writes: the ONLY three write operations this client exposes ------
 
     def add_labels(self, owner: str, repo: str, issue_number: int, labels: Iterable[str]) -> Any:
         """``POST /repos/{owner}/{repo}/issues/{issue_number}/labels`` (§8.2)."""
@@ -311,6 +352,65 @@ class GitHubClient:
         self._record(response.headers)
         return response.json()
 
+    @requires_approval
+    def create_draft_pr(
+        self, owner: str, repo: str, pr: DraftPR, approval: FixPRApproval
+    ) -> dict[str, Any]:
+        """Open a **draft** pull request for one human-approved fix proposal (§6.1):
+        ``POST /git/refs`` (a new ``repo-maint/fix-*`` branch at ``base_sha``), one
+        ``PUT /contents/{path}`` per changed file on that branch, then ``POST /pulls``
+        with ``draft: true``. Never merges, never enables auto-merge.
+
+        Refuses (``PermissionError``) unless ``approval`` passed for this repo and
+        this proposal id -- which takes all five write gates, ``allow_fix_prs``, role
+        ``sandbox`` and a human approval (``config.approve_fix_pr``).
+        """
+        _check_draft_pr(owner, repo, pr, approval)
+        self._check_rate_limit()
+        try:
+            response = self._http.request(
+                "POST",
+                _url(f"/repos/{owner}/{repo}/git/refs"),
+                headers=self._headers,
+                json_body={"ref": f"refs/heads/{pr.head_branch}", "sha": pr.base_sha},
+                ttl_seconds=0,
+            )
+            self._record(response.headers)
+            for change in pr.files:
+                payload: dict[str, Any] = {
+                    "message": f"repo-maint fix proposal {pr.proposal_id}: {change.path}",
+                    "content": base64.b64encode(change.content.encode()).decode(),
+                    "branch": pr.head_branch,
+                }
+                if change.blob_sha:
+                    payload["sha"] = change.blob_sha
+                response = self._http.request(
+                    "PUT",
+                    _url(f"/repos/{owner}/{repo}/contents/{change.path}"),
+                    headers=self._headers,
+                    json_body=payload,
+                    ttl_seconds=0,
+                )
+                self._record(response.headers)
+            response = self._http.request(
+                "POST",
+                _url(f"/repos/{owner}/{repo}/pulls"),
+                headers=self._headers,
+                json_body={
+                    "title": pr.title,
+                    "head": pr.head_branch,
+                    "base": pr.base_branch,
+                    "body": pr.body,
+                    "draft": True,
+                    "maintainer_can_modify": True,
+                },
+                ttl_seconds=0,
+            )
+        except HttpError as e:
+            raise GitHubRequestError(f"create_draft_pr failed: {e}") from e
+        self._record(response.headers)
+        return response.json()
+
 
 def _read_pages(path: Path) -> dict[str, Any] | None:
     try:
@@ -318,6 +418,25 @@ def _read_pages(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) and isinstance(data.get("items"), list) else None
+
+
+def _check_draft_pr(owner: str, repo: str, pr: DraftPR, approval: FixPRApproval) -> None:
+    if not (
+        isinstance(approval, FixPRApproval)
+        and approval.passed
+        and approval.repo == f"{owner}/{repo}"
+        and approval.proposal_id == pr.proposal_id
+    ):
+        raise PermissionError(
+            f"create_draft_pr needs a passing FixPRApproval for {owner}/{repo} proposal"
+            f" {pr.proposal_id}; got {approval!r}"
+        )
+    if not pr.head_branch.startswith(FIX_BRANCH_PREFIX):
+        raise ValueError(f"fix branches must start with {FIX_BRANCH_PREFIX!r}")
+    if DRAFT_PR_BANNER not in pr.body:
+        raise ValueError("a fix-proposal PR body must carry the human-review banner")
+    if not pr.files:
+        raise ValueError("a fix-proposal PR needs at least one file change")
 
 
 def _next_link(link_header: str | None) -> str | None:

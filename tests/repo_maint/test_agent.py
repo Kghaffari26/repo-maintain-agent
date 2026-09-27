@@ -15,6 +15,7 @@ from agents.repo_maint.agent import (
     AGENT,
     NO_KEY_WARNING,
     RepoMaintAgent,
+    approved_fix_ids,
     llm_available,
     repos_filter,
 )
@@ -193,3 +194,19 @@ def test_trace_json_records_the_run_per_repo(agent, tmp_path):
     assert spans["compute:you/widgets"]["attrs"]["untriaged"] == 2
     assert sum(1 for s in trace["spans"] if s["kind"] == "llm_call") == 2
     assert "test-token" not in json.dumps(trace)  # redacted
+
+
+def test_approve_fix_flag_takes_proposal_ids_only():
+    assert approved_fix_ids(["--approve-fix", "abc123abc123,def456def456"]) == {
+        "abc123abc123",
+        "def456def456",
+    }
+    assert approved_fix_ids([]) == set()
+    with pytest.raises(ValueError, match="not proposal ids"):
+        approved_fix_ids(["--approve-fix=../../etc"])
+
+
+def test_a_malformed_approval_fails_the_run_before_any_request(agent):
+    requests: list[httpx.Request] = []
+    assert _run(agent, requests=requests, extra_args=["--approve-fix", "nope"]) == 1
+    assert requests == []

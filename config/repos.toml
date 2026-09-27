@@ -6,6 +6,11 @@ max_triage_per_repo_per_run = 25
 max_changelog_items = 80
 max_writes_per_run = 15
 max_writes_per_repo_per_day = 10
+# Fix proposer (spec §6.1): at most this many agent loops per run, each capped at
+# fix_loop_max_steps model calls and fix_loop_max_usd.
+max_fix_proposals_per_run = 2
+fix_loop_max_steps = 12
+fix_loop_max_usd = 0.15
 
 [health.penalties]
 untriaged_7d_each = 3
@@ -79,12 +84,15 @@ priority_labels = {}
 extra_triaged_labels = ["triaged"]
 ignore_labels = ["wontfix", "on-hold"]
 
-# Add once you've created it (§2, §9). This is where apply mode gets demonstrated
-# safely -- real labels/comments the agent made, on a repo built for exactly that.
+# Add once you've created it and run scripts/seed_sandbox.py yourself (§2, §9). This
+# is where apply mode gets demonstrated safely -- real labels/comments the agent made,
+# on a repo built for exactly that. allow_fix_prs lets the fix proposer (§6.1) run
+# here; a draft PR additionally needs every write gate AND `--approve-fix <id>`.
 # [[repo]]
 # full_name = "Kghaffari26/agents-hub-sandbox"
 # role = "sandbox"
 # allow_apply = true
+# allow_fix_prs = true
 # token = "repo_maint"
 # label_map = { bug = "bug", feature = "enhancement", question = "question", docs = "documentation" }
 # priority_labels = { p0 = "priority: critical", p1 = "priority: high", p2 = "priority: medium", p3 = "priority: low" }

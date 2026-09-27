@@ -21,6 +21,9 @@ class RepoState(BaseModel):
     changelog_cache: dict[str, Any] | None = None
     commented: list[int] = Field(default_factory=list)
     labeled: dict[str, list[str]] = Field(default_factory=dict)
+    # Fix proposer (§6.1): every attempt by proposal id, incl. no_fix/stopped ones, so an
+    # issue isn't re-attempted until its text changes; pruned to open issues each run.
+    fix_proposals: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class State(BaseModel):

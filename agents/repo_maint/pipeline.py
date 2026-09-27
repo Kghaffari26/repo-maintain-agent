@@ -26,13 +26,20 @@ from agents.repo_maint import actions as actions_mod
 from agents.repo_maint import changelog as changelog_mod
 from agents.repo_maint import duplicates as duplicates_mod
 from agents.repo_maint import fetch as fetch_mod
+from agents.repo_maint import fix_proposer as fix_mod
 from agents.repo_maint import health as health_mod
 from agents.repo_maint import metrics as metrics_mod
 from agents.repo_maint import schema
 from agents.repo_maint import stale as stale_mod
 from agents.repo_maint import triage as triage_mod
 from agents.repo_maint import untriaged as untriaged_mod
-from agents.repo_maint.config import Config, RepoConfig, check_write_gates
+from agents.repo_maint.config import (
+    Config,
+    GateCheck,
+    RepoConfig,
+    approve_fix_pr,
+    check_write_gates,
+)
 from agents.repo_maint.gh import GitHubClient, GitHubRequestError, GitHubTokenMissing
 from agents.repo_maint.state import RepoState, State, get_repo_state
 
@@ -367,6 +374,7 @@ def finish_repo(
     draft_fn: changelog_mod.DraftFn | None = None,
     draft_model: str | None = None,
     warnings: list[str] | None = None,
+    fix_ctx: fix_mod.FixContext | None = None,
 ) -> tuple[schema.RepoEntry, list[schema.ActionEntry]]:
     """Triage, changelog and actions for one repo. Non-fatal problems are appended
     to ``warnings`` (published as ``meta.warnings``)."""
@@ -502,6 +510,11 @@ def finish_repo(
                 elif action.type == "comment":
                     repo_state.commented.append(action.target)
 
+    # -- fix proposals (§6.1): sandbox + allow_fix_prs only ----------------------------------
+    fix_entries = _fix_proposals(
+        work, repo_state, now, fix_ctx, triage_results, gate, budget, warnings.append
+    )
+
     repo_entry = schema.RepoEntry(
         full_name=repo.full_name,
         url=_repo_url(repo),
@@ -544,8 +557,55 @@ def finish_repo(
             generated_at=generated_at,
             cached=changelog_result.cached,
         ),
+        fix_proposals=fix_entries,
     )
     return repo_entry, action_entries
+
+
+def _fix_proposals(
+    work: RepoWork,
+    repo_state: RepoState,
+    now: datetime,
+    fix_ctx: fix_mod.FixContext | None,
+    triage_results: list[tuple[triage_mod.TriageResult | None, bool]],
+    gate: GateCheck,
+    budget: actions_mod.RunBudget,
+    warn: Callable[[str], None],
+) -> list[schema.FixProposalEntry]:
+    """Propose fixes for eligible issues, open draft PRs for human-approved ones
+    (all write gates + allow_fix_prs), and return the published entries."""
+    repo = work.repo
+    snapshot = work.fetched.snapshot
+    open_numbers = {i["number"] for i in snapshot.open_issues}
+    stored = {
+        k: v for k, v in repo_state.fix_proposals.items() if v["issue_number"] in open_numbers
+    }
+    if fix_ctx is not None and repo.allow_fix_prs and repo.role == "sandbox":
+        default_branch = snapshot.meta.get("default_branch", "main")
+        candidates = [
+            (work.issues_by_number[r.number], r) for r, _cached in triage_results if r is not None
+        ]
+        fix_mod.propose_for_repo(
+            fix_ctx, repo, work.fetched.client, default_branch, candidates, stored, now, warn
+        )
+        if fix_ctx.approved_ids:
+            fix_mod.open_approved_prs(
+                repo,
+                work.fetched.client if gate.passed else None,
+                default_branch,
+                stored,
+                approve=lambda pid: approve_fix_pr(
+                    repo, pid, write_gates=gate, human_approved_ids=fix_ctx.approved_ids
+                ),
+                can_write=lambda: budget.can_write(repo.full_name),
+                record_write=lambda: budget.record_write(repo.full_name),
+            )
+    repo_state.fix_proposals = stored
+    published = set(schema.FixProposalEntry.model_fields)
+    return [
+        schema.FixProposalEntry.model_validate({k: v for k, v in e.items() if k in published})
+        for e in sorted(stored.values(), key=lambda e: (e["issue_number"], e["proposed_at"]))
+    ]
 
 
 def schema_iso(dt: datetime) -> str:
@@ -680,6 +740,7 @@ def run(
     draft_fn: changelog_mod.DraftFn | None = None,
     draft_model: str | None = None,
     previous_stats: dict[str, float] | None = None,
+    fix_ctx: fix_mod.FixContext | None = None,
 ) -> RunResult:
     """Runs every configured repo. Mutates ``state`` in place (caller saves it)."""
     now = now or datetime.now(UTC)
@@ -697,6 +758,7 @@ def run(
         draft_fn=draft_fn,
         draft_model=draft_model,
         previous_stats=previous_stats,
+        fix_ctx=fix_ctx,
     )
 
 
@@ -713,6 +775,7 @@ def finish_all(
     draft_fn: changelog_mod.DraftFn | None,
     draft_model: str | None,
     previous_stats: dict[str, float] | None = None,
+    fix_ctx: fix_mod.FixContext | None = None,
 ) -> RunResult:
     """Stage 3 over every computed repo, then the §6 body."""
     warnings = [f"{name}: skipped this run ({reason})" for name, reason in failed.items()]
@@ -736,6 +799,7 @@ def finish_all(
                 draft_fn=draft_fn,
                 draft_model=draft_model,
                 warnings=warnings,
+                fix_ctx=fix_ctx,
             )
             sp.set(
                 health=entry.health.score,

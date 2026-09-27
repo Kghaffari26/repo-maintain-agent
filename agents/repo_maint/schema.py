@@ -123,6 +123,41 @@ class ChangelogBlock(Model):
     cached: bool
 
 
+FixStatus = Literal["proposed", "no_fix", "stopped", "pr_opened", "approval_blocked", "failed"]
+
+
+class FixLoopInfo(Model):
+    """How the fix proposer's agent loop went (§6.1)."""
+
+    steps: int = Field(ge=0)
+    stop_reason: str
+    usd: float = Field(ge=0)
+    tools_called: list[str] = Field(default_factory=list)
+
+
+class FixProposalEntry(Model):
+    """One fix-proposer result for one issue (§6.1). ``id`` is what a human approves
+    (``--approve-fix <id>``); it's bound to the exact ``diff``."""
+
+    id: str = Field(pattern=r"^[0-9a-f]{12}$")
+    issue_number: int
+    issue_url: HttpUrl
+    issue_title: str
+    status: FixStatus
+    reason: str | None = None
+    summary: str | None = None
+    rationale: str | None = None
+    narrative_source: NarrativeSource | None = None
+    diff: str | None = None
+    files_changed: list[str] = Field(default_factory=list)
+    lines_added: int = Field(default=0, ge=0)
+    lines_removed: int = Field(default=0, ge=0)
+    pr_url: HttpUrl | None = None
+    loop: FixLoopInfo
+    model: str | None = None
+    proposed_at: Timestamp
+
+
 class RepoEntry(Model):
     full_name: str
     url: HttpUrl
@@ -138,6 +173,8 @@ class RepoEntry(Model):
     triage: list[TriageItem] = Field(default_factory=list)
     stale_prs: list[StalePRItem] = Field(default_factory=list)
     changelog: ChangelogBlock
+    # §6.1, additive (schema 1.1.0): sandbox repos with allow_fix_prs only; else [].
+    fix_proposals: list[FixProposalEntry] = Field(default_factory=list)
 
 
 class ActionEntry(Model):

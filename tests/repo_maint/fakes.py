@@ -45,8 +45,10 @@ class FakeAnthropic:
     """Stands in for ``anthropic.Anthropic`` inside ``agents_core.llm.LLM``.
 
     ``responses`` are consumed in order: a ``str`` answers ``messages.create``
-    (plain text), a pydantic model or dict answers ``messages.parse`` (structured
-    output; a dict is validated against the requested ``output_format``).
+    (plain text), a ``turn(...)`` dict answers ``messages.create`` with content
+    blocks (a tool-use loop step, see ``turn``/``tool_use``), and a pydantic model or
+    other dict answers ``messages.parse`` (structured output; a dict is validated
+    against the requested ``output_format``).
     Every call's kwargs are recorded in ``calls``.
     """
 
@@ -77,8 +79,12 @@ class FakeAnthropic:
         )
 
     def _create(self, **kwargs: Any) -> SimpleNamespace:
-        text = self._next(kwargs)
-        return self._message(content=[SimpleNamespace(type="text", text=text)])
+        value = self._next(kwargs)
+        if isinstance(value, dict) and "content" in value:
+            message = self._message(content=[SimpleNamespace(**b) for b in value["content"]])
+            message.stop_reason = value.get("stop_reason", "tool_use")
+            return message
+        return self._message(content=[SimpleNamespace(type="text", text=value)])
 
     def _parse(self, *, output_format: Any, **kwargs: Any) -> SimpleNamespace:
         value = self._next({**kwargs, "output_format": output_format})
@@ -94,3 +100,19 @@ def fake_llm(responses: list[Any], tmp_path: Path, *, max_usd: float = 1.0) -> t
     )
     client = FakeAnthropic(responses)
     return LLM(tracker, client=client, sleep=sleepless), client
+
+
+# -- scripted tool-use turns (agents_core.agent_loop) ---------------------------------------
+
+_tool_ids = itertools.count(1)
+
+
+def tool_use(name: str, **tool_input: Any) -> dict[str, Any]:
+    """One ``tool_use`` content block."""
+    return {"type": "tool_use", "id": f"toolu_{next(_tool_ids)}", "name": name, "input": tool_input}
+
+
+def turn(*blocks: dict[str, Any], text: str = "", stop_reason: str = "tool_use") -> dict[str, Any]:
+    """One scripted assistant turn for ``FakeAnthropic`` (``messages.create``)."""
+    content = ([{"type": "text", "text": text}] if text else []) + list(blocks)
+    return {"content": content, "stop_reason": stop_reason}

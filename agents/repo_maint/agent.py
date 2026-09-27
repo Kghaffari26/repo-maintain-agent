@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from agents_core.llm import LLM, tier_config
 from agents_core.schema import Source
 
 from agents.repo_maint import changelog as changelog_mod
+from agents.repo_maint import fix_proposer as fix_mod
 from agents.repo_maint import pipeline, schema
 from agents.repo_maint import triage as triage_mod
 from agents.repo_maint.config import Config, RepoConfig, load_config
@@ -45,26 +47,43 @@ GITHUB_DAILY_REQUEST_CAP = 2000
 GITHUB_MAX_ATTEMPTS = 3
 
 NO_KEY_WARNING = (
-    "ANTHROPIC_API_KEY is not set: issues were left untriaged (unscored) and changelogs"
-    " use the template grouping"
+    "ANTHROPIC_API_KEY is not set: issues were left untriaged (unscored), changelogs"
+    " use the template grouping, and no fixes were proposed"
 )
 
 #: `--repos a/b,c/d` (forwarded by agents-run as an extra arg) narrows a run, §10.
 REPOS_FLAG = "--repos"
+#: `--approve-fix <id>[,<id>]`: a human approves fix proposals by id (§6.1).
+APPROVE_FIX_FLAG = "--approve-fix"
+_PROPOSAL_ID = re.compile(r"^[0-9a-f]{12}$")
 
 
-def repos_filter(extra_args: list[str]) -> set[str] | None:
-    """Parse ``--repos a/b,c/d`` or ``--repos=a/b,c/d`` from ``ctx.extra_args``."""
+def _flag_values(extra_args: list[str], flag: str) -> set[str] | None:
+    """Comma-separated values of ``flag v`` or ``flag=v`` in ``ctx.extra_args``."""
     for i, arg in enumerate(extra_args):
         value = None
-        if arg == REPOS_FLAG and i + 1 < len(extra_args):
+        if arg == flag and i + 1 < len(extra_args):
             value = extra_args[i + 1]
-        elif arg.startswith(REPOS_FLAG + "="):
+        elif arg.startswith(flag + "="):
             value = arg.split("=", 1)[1]
         if value is not None:
             names = {v.strip() for v in value.split(",") if v.strip()}
             return names or None
     return None
+
+
+def repos_filter(extra_args: list[str]) -> set[str] | None:
+    """Parse ``--repos a/b,c/d`` or ``--repos=a/b,c/d`` from ``ctx.extra_args``."""
+    return _flag_values(extra_args, REPOS_FLAG)
+
+
+def approved_fix_ids(extra_args: list[str]) -> set[str]:
+    """Parse ``--approve-fix id1,id2``; ids are the 12-hex-digit proposal ids."""
+    ids = _flag_values(extra_args, APPROVE_FIX_FLAG) or set()
+    bad = sorted(i for i in ids if not _PROPOSAL_ID.match(i))
+    if bad:
+        raise ValueError(f"{APPROVE_FIX_FLAG}: not proposal ids: {bad}")
+    return ids
 
 
 def llm_available(llm: LLM) -> bool:
@@ -139,6 +158,7 @@ class RepoMaintAgent(Agent):
 
     def fetch(self, ctx: RunContext) -> Fetched:
         config = load_config(self.config_path)
+        approved_fix_ids(ctx.extra_args)  # fail fast on a malformed approval
         wanted = repos_filter(ctx.extra_args)
         if wanted is not None:
             unknown = wanted - {r.full_name for r in config.repo}
@@ -213,6 +233,15 @@ class RepoMaintAgent(Agent):
         ) -> triage_mod.ClassifyFn:
             return triage_mod.make_classify_fn(ctx.llm, repo, description, labels)
 
+        settings = fetched.config.settings
+        fix_ctx = fix_mod.FixContext(
+            llm=ctx.llm if use_llm else None,
+            approved_ids=approved_fix_ids(ctx.extra_args),
+            model=tier_config(fix_mod.FIX_TIER).model,
+            proposals_left=settings.max_fix_proposals_per_run,
+            max_steps=settings.fix_loop_max_steps,
+            max_usd=settings.fix_loop_max_usd,
+        )
         previous = ctx.previous_latest()
         result = pipeline.finish_all(
             data.works,
@@ -226,6 +255,7 @@ class RepoMaintAgent(Agent):
             draft_fn=changelog_mod.make_draft_fn(ctx.llm) if use_llm else None,
             draft_model=tier_config("smart").model,
             previous_stats=pipeline.previous_key_stats(previous),
+            fix_ctx=fix_ctx,
         )
         save_state(self.state_path, fetched.state)
 
