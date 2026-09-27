@@ -180,3 +180,16 @@ def test_github_host_gets_a_daily_cap_and_retries():
     AGENT.configure_http(http)
     policy = http.policies["api.github.com"]
     assert policy.daily_budget == 2000 and policy.attempts(1) == 3
+
+
+def test_trace_json_records_the_run_per_repo(agent, tmp_path):
+    assert _run(agent, llm=FakeAnthropic([TRIAGE, TRIAGE])) == 0
+    trace = json.loads((tmp_path / "public-data" / "trace.json").read_text())
+    spans = {s["name"]: s for s in trace["spans"]}
+    for name in ("fetch:you/widgets", "compute:you/widgets", "repo:you/widgets"):
+        assert spans[name]["kind"] == "custom", name
+    assert spans["triage:you/widgets"]["attrs"]["fresh"] == 2
+    assert spans["changelog:you/widgets"]["attrs"]["narrative_source"] == "template"
+    assert spans["compute:you/widgets"]["attrs"]["untriaged"] == 2
+    assert sum(1 for s in trace["spans"] if s["kind"] == "llm_call") == 2
+    assert "test-token" not in json.dumps(trace)  # redacted

@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from agents_core import tracing
 from agents_core.http import HttpError
 
 from agents.repo_maint import actions as actions_mod
@@ -378,15 +379,24 @@ def finish_repo(
     classify_fn = None
     if classify_factory is not None:
         classify_fn = classify_factory(repo, snapshot.meta.get("description"), snapshot.labels)
-    triage_results = triage_mod.triage_repo(
-        work.untriaged_issues,
-        work.candidates_by_number,
-        snapshot.labels,
-        repo,
-        repo_state.triage_cache,
-        classify_fn,
-        config.settings.max_triage_per_repo_per_run,
-    )
+    with tracing.span(
+        "custom", f"triage:{repo.full_name}", untriaged=len(work.untriaged_issues)
+    ) as sp:
+        triage_results = triage_mod.triage_repo(
+            work.untriaged_issues,
+            work.candidates_by_number,
+            snapshot.labels,
+            repo,
+            repo_state.triage_cache,
+            classify_fn,
+            config.settings.max_triage_per_repo_per_run,
+        )
+        sp.set(
+            cached=sum(1 for r, cached in triage_results if r is not None and cached),
+            fresh=sum(1 for r, cached in triage_results if r is not None and not cached),
+            skipped=sum(1 for r, _ in triage_results if r is None),
+            model=classify_fn is not None,
+        )
     triage_items = _build_triage_items(triage_results, repo, work.issues_by_number)
     not_triaged = sum(1 for result, _ in triage_results if result is None)
     if classify_fn is not None and not_triaged:
@@ -409,14 +419,22 @@ def finish_repo(
 
     # -- changelog (§7.3) -------------------------------------------------------------------
     cache = repo_state.changelog_cache
-    changelog_result = changelog_mod.build_changelog(
-        base=work.fetched.base,
-        items=work.changelog_items,
-        content_source=work.content_source,
-        version_heading=work.version_heading,
-        cache=cache,
-        draft_fn=draft_fn,
-    )
+    with tracing.span(
+        "custom", f"changelog:{repo.full_name}", items=len(work.changelog_items)
+    ) as sp:
+        changelog_result = changelog_mod.build_changelog(
+            base=work.fetched.base,
+            items=work.changelog_items,
+            content_source=work.content_source,
+            version_heading=work.version_heading,
+            cache=cache,
+            draft_fn=draft_fn,
+        )
+        sp.set(
+            source=changelog_result.source,
+            narrative_source=changelog_result.narrative_source,
+            cached=changelog_result.cached,
+        )
     if draft_fn is not None and not changelog_result.cacheable:
         warnings.append(
             f"{repo.full_name}: the changelog model call failed; published the template grouping"
@@ -633,10 +651,15 @@ def fetch_all(
     failed: dict[str, str] = {}
     for repo in config.repo:
         try:
-            client = build_client(repo)
-            fetched.append(
-                fetch_repo_data(repo, client, now, config.settings.max_changelog_items)
-            )
+            with tracing.span("custom", f"fetch:{repo.full_name}") as sp:
+                client = build_client(repo)
+                repo_fetch = fetch_repo_data(repo, client, now, config.settings.max_changelog_items)
+                sp.set(
+                    github_requests=client.requests_made,
+                    github_304s=client.not_modified_count,
+                    partial=repo_fetch.snapshot.partial or repo_fetch.changelog_partial,
+                )
+            fetched.append(repo_fetch)
         except REPO_FAILURES as e:
             log.error("%s: skipped this run: %s", repo.full_name, e)
             failed[repo.full_name] = str(e)
@@ -700,19 +723,26 @@ def finish_all(
     repo_entries: list[schema.RepoEntry] = []
     all_actions: list[schema.ActionEntry] = []
     for work in works:
-        entry, actions_out = finish_repo(
-            work,
-            get_repo_state(state, work.repo.full_name),
-            now,
-            config,
-            apply_flag=apply_flag,
-            apply_changes_env=apply_changes_env,
-            budget=budget,
-            classify_factory=classify_factory,
-            draft_fn=draft_fn,
-            draft_model=draft_model,
-            warnings=warnings,
-        )
+        with tracing.span("custom", f"repo:{work.repo.full_name}") as sp:
+            entry, actions_out = finish_repo(
+                work,
+                get_repo_state(state, work.repo.full_name),
+                now,
+                config,
+                apply_flag=apply_flag,
+                apply_changes_env=apply_changes_env,
+                budget=budget,
+                classify_factory=classify_factory,
+                draft_fn=draft_fn,
+                draft_model=draft_model,
+                warnings=warnings,
+            )
+            sp.set(
+                health=entry.health.score,
+                triaged=len(entry.triage),
+                actions=len(actions_out),
+                applied=sum(1 for a in actions_out if a.status == "applied"),
+            )
         repo_entries.append(entry)
         all_actions.extend(actions_out)
 

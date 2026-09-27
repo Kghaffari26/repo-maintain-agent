@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agents_core import tracing
 from agents_core.agent import Agent, AgentResult, RunContext
 from agents_core.http import HostPolicy, Http
 from agents_core.llm import LLM, tier_config
@@ -164,12 +165,19 @@ class RepoMaintAgent(Agent):
     # -- transform: every published number, no LLM -----------------------------------------
 
     def transform(self, ctx: RunContext, raw: Fetched) -> Computed:
-        works = [
-            pipeline.compute_repo(
-                f, get_repo_state(raw.state, f.repo.full_name), raw.now, raw.config
-            )
-            for f in raw.repos
-        ]
+        works = []
+        for f in raw.repos:
+            with tracing.span("custom", f"compute:{f.repo.full_name}") as sp:
+                work = pipeline.compute_repo(
+                    f, get_repo_state(raw.state, f.repo.full_name), raw.now, raw.config
+                )
+                sp.set(
+                    health=work.health.score,
+                    untriaged=len(work.untriaged_issues),
+                    stale_prs=len(work.stale_items),
+                    changelog_items=len(work.changelog_items),
+                )
+            works.append(work)
         return Computed(fetched=raw, works=works)
 
     def summarize_dry_run(self, data: Computed) -> str:
