@@ -1,9 +1,25 @@
-# Status — session 2026-09-27 (agents-core v0.3.0, fix proposer, evals, tracing)
+# Status — session 2026-09-27 (agents-core v0.3.1, fix proposer, evals, tracing)
 
 Read this first. `DECISIONS.md` has the reasoning behind every judgment call
-referenced here (this session's are under "Session 2026-09-27").
+referenced here (this session's are under "Session 2026-09-27" and "(2): agents-core v0.3.1").
 
-## TL;DR
+## Upgrade to agents-core v0.3.1 (latest)
+
+- Pin and all three workflow `uses:` refs are `@v0.3.1`.
+- **Temperature is back** on the fast tier (`config/models.toml`, 0 for triage and
+  the judge); v0.3.1 sends it in `extra_body`. Live smoke check: one `complete` and
+  one `structured` call at temperature 0, both fine, **$0.0003**.
+- The fix-proposer `LLMJudge` gets `max_tokens=512` (was the tier's 4096), fixing the
+  inflated pre-call estimate.
+- `evals/repo_maint/ci.py` uses `run_suites(total_max_usd=)` instead of its own
+  cap-splitting loop: `--total-max-usd` (default $1.00) and `--max-usd` per suite;
+  `evals.yml` passes `total_max_usd: "1.00"`.
+- **398 tests passing, ruff clean**, offline evals all 1.0 ($0). No live evals, zero
+  GitHub API writes.
+- Needed from agents-core: item 1 (temperature) and item 3 (`LLMJudge` controls) below
+  are resolved by v0.3.1; item 2 (`DownloadResult.headers`) is still deferred.
+
+## TL;DR (earlier today: the v0.3.0 session)
 
 - **On agents-core v0.3.0**, with every v0.1.0 workaround removed. The workflow
   calls `run-agent.yml@v0.3.0` from two least-privilege jobs, and **CI can now do real

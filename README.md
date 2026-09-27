@@ -52,7 +52,7 @@ scores repo health and, on a sandbox repo, proposes fixes for small bugs as
 - **Numbers come from code.** Health scores, counts, deltas and line counts are
   computed in `transform`; the model only writes narrative about them.
 
-It's an agents-core agent pinned at **v0.3.0**, registered as `repo_maint`.
+It's an agents-core agent pinned at **v0.3.1**, registered as `repo_maint`.
 **Start here:** [`STATUS.md`](STATUS.md) (current state, what needs a human),
 [`DECISIONS.md`](DECISIONS.md) (every judgment call), and
 [`docs/case-studies.md`](docs/case-studies.md) (bugs the evals, guards and live runs
@@ -125,7 +125,7 @@ uv run agents-run repo_maint                    # report mode: publishes public-
 uv run agents-run repo_maint --repos a/b,c/d    # only these configured repos
 uv run agents-run repo_maint --apply --approve-fix <id>   # see §8.1 and §6.1 first
 uv run python -m evals.repo_maint.ci            # offline suites; live ones too if a key is set
-uv run python -m evals.repo_maint.ci --live --max-usd 1.00 --record   # re-record trajectories
+uv run python -m evals.repo_maint.ci --live --total-max-usd 1.00 --record   # re-record trajectories
 uv run ruff check .
 ```
 
@@ -182,14 +182,15 @@ proposals) and `repo_maint/github/` (conditional-read bodies + ETags from
 
 - `.github/workflows/agent-repo-maint.yml`: daily at 07:00 PT and on dispatch
   (inputs `repos`, `approve_fix`). Two least-privilege jobs call
-  `run-agent.yml@v0.3.0`: `report` (`contents: write`, `issues: read`,
+  `run-agent.yml@v0.3.1`: `report` (`contents: write`, `issues: read`,
   `pull-requests: read`, `checks: read`) by default, and `apply` (`issues: write`
   instead, `apply_changes: true`, `--apply`) only when the repo variable
   `APPLY_CHANGES` is `'true'`. The reusable workflow restores the `data` branch
   first, passes `GITHUB_TOKEN`/`REPO_MAINT_TOKEN`/`APPLY_CHANGES`, and force-pushes
   `public-data/` to `data`.
 - `.github/workflows/evals.yml`: on PRs touching agent code, evals, config or the
-  sandbox package, `run-evals.yml@v0.3.0` (`contents: read`, `max_usd: 1.00`,
+  sandbox package, `run-evals.yml@v0.3.1` (`contents: read`, `max_usd: 1.00` per suite and
+  `total_max_usd: 1.00` across them,
   regression threshold 0.05).
 
 ## Safety design (§8)

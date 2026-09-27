@@ -5,8 +5,8 @@
 # evals.repo_maint.ci always runs the offline suites ($0: worst-case injection, the
 # changelog guard, the recorded fix-proposer trajectories replayed). With the
 # ANTHROPIC_API_KEY secret available (not on PRs from forks) it also runs the live
-# suites (triage, injection, changelog, fix proposer with an LLM judge), all under
-# one spend cap: max_usd below, exported as AGENTS_CORE_EVAL_MAX_USD.
+# suites (triage, injection, changelog, fix proposer with an LLM judge), each under
+# max_usd and all together under total_max_usd (agents-core's run_suites).
 name: Evals
 
 on:
@@ -25,10 +25,11 @@ jobs:
   evals:
     permissions:
       contents: read
-    uses: Kghaffari26/agents-core/.github/workflows/run-evals.yml@v0.3.0
+    uses: Kghaffari26/agents-core/.github/workflows/run-evals.yml@v0.3.1
     with:
       eval_command: uv run python -m evals.repo_maint.ci
       max_usd: "1.00"
+      total_max_usd: "1.00"
       regression_threshold: "0.05"
       paths: "agents/* evals/* config/* scripts/sandbox_package/* pyproject.toml uv.lock"
     secrets: inherit

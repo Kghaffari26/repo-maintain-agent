@@ -471,6 +471,10 @@ def _patch_fixes_bug(case: EvalCase, out: dict[str, Any]) -> Score:
     return _score("patch_fixes_bug", out["fixed"], detail=out.get("reason") or "")
 
 
+# The verdict is a 1-5 score and a short reasoning; without a cap the judge used the
+# fast tier's 4096 output tokens, which inflated its worst-case pre-call estimate.
+FIX_JUDGE_MAX_TOKENS = 512
+
 FIX_JUDGE_RUBRIC = (
     "You review a proposed fix for a reported bug in a small Python package. Score 5 if the"
     " diff is a minimal, correct, idiomatic fix of exactly the reported bug, with a summary"
@@ -497,7 +501,10 @@ FIX_PROPOSER = EvalSuite(
     prompt_version=fix_mod.PROMPT_VERSION,
     cases=fix_cases(),
     task=run_fix_live,
-    scorers=[*FIX_TRAJECTORY_SCORERS, LLMJudge(FIX_JUDGE_RUBRIC, output=_judge_view)],
+    scorers=[
+        *FIX_TRAJECTORY_SCORERS,
+        LLMJudge(FIX_JUDGE_RUBRIC, output=_judge_view, max_tokens=FIX_JUDGE_MAX_TOKENS),
+    ],
 )
 
 

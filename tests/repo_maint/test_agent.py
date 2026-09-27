@@ -212,10 +212,19 @@ def test_a_malformed_approval_fails_the_run_before_any_request(agent):
     assert requests == []
 
 
-def test_no_tier_sets_a_sampling_parameter_the_sdk_rejects():
-    """anthropic>=1.8 rejects `temperature`; agents-core sends a tier's temperature
-    when models.toml sets one, so every tier must leave it unset (see DECISIONS.md)."""
+def test_the_fast_tier_pins_temperature_zero_in_the_request_body(tmp_path):
+    """agents-core v0.3.1 sends a tier's temperature in `extra_body` (anthropic 1.8 has
+    no `temperature=` keyword; FakeAnthropic rejects one). Triage and the eval judge run
+    on the fast tier at 0; the smart tier keeps the model default."""
     from agents_core.llm import tier_config
 
-    assert tier_config("fast").temperature is None
+    from tests.repo_maint.fakes import fake_llm
+
+    assert tier_config("fast").temperature == 0
     assert tier_config("smart").temperature is None
+    llm, client = fake_llm(["ok", "ok"], tmp_path)
+    llm.complete("fast", "hi", system="s", purpose="t")
+    llm.complete("smart", "hi", system="s", purpose="t")
+    assert "temperature" not in client.calls[0]
+    assert client.calls[0]["extra_body"]["temperature"] == 0
+    assert "temperature" not in client.calls[1].get("extra_body", {})

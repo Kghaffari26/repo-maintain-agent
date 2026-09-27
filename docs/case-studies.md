@@ -57,6 +57,11 @@ STATUS.md.
 **Result.** Re-adding the override now fails 8 unit tests with no network and no
 spend. The live suites that followed made about 100 model calls with no errors.
 
+**Follow-up.** agents-core v0.3.1 sends `temperature` in `extra_body`, so the fast
+tier's `temperature = 0` is back (one live smoke call each of `complete` and
+`structured`, $0.0003), and the fake's tests now assert
+`kwargs["extra_body"]["temperature"]`.
+
 ## 3. A 304 turned a repo with issues into an empty one
 
 **Problem.** GitHub reads are conditional (ETags) so that unchanged repos cost

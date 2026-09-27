@@ -12,7 +12,7 @@ reasoned deviation.
 state of the build and the reasoning behind every non-obvious choice —
 don't re-derive decisions that are already logged there.
 
-It's an agents-core agent: `agents-core` is pinned at `v0.3.0` in
+It's an agents-core agent: `agents-core` is pinned at `v0.3.1` in
 `pyproject.toml`; its README, CHANGELOG and CLAUDE.md define the agent contract,
 the number guard, the agent loop, tracing, evals and the data-branch contract. Don't modify agents-core from here —
 if it's missing something, list it under "Needed from agents-core" in STATUS.md.
@@ -39,7 +39,7 @@ repo-maint-agent/
 ```
 
 Run it with `uv run agents-run repo_maint [--dry-run] [--apply] [--repos a/b,c/d] [--approve-fix <id>]`.
-Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--max-usd N] [--record]`.
+Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--total-max-usd N] [--max-usd N] [--record]`.
 
 ## Rules
 
@@ -62,9 +62,11 @@ Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--max-usd N] 
 - **GitHub reads**: conditional ones go through `Http.download` (`cache_key=` in
   `gh.py`, bodies in `data/repo_maint/github/`); every other read passes
   `ttl_seconds=0` so agents-core's dev cache never serves stale issue data.
-- **Don't set `temperature`** in `config/models.toml` or on a call: anthropic 1.8
-  rejects it (case study 2). `tests/repo_maint/fakes.FakeAnthropic` rejects any
-  kwarg the installed SDK doesn't accept; keep it that strict.
+- **`temperature`** is set only on the fast tier (`config/models.toml`, 0). It needs
+  agents-core >= v0.3.1, which sends it in `extra_body` (anthropic 1.8 has no
+  `temperature=` keyword; case study 2). `tests/repo_maint/fakes.FakeAnthropic`
+  rejects any kwarg the installed SDK doesn't accept; keep it that strict, and assert
+  `kwargs["extra_body"]["temperature"]`, never `kwargs["temperature"]`.
 - **Apply mode is real but gated five ways** (§8.1). Never run with
   `--apply` against live GitHub, or call `execute_actions` with a live client
   and `gate_passed=True` outside a test, unless you've actually confirmed all
@@ -98,7 +100,7 @@ Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--max-usd N] 
 - Tests never write into the repo's `data/`/`evals/`/`public-data/`
   (`tests/conftest.py`), and each mocked `Http` gets its own cache dir.
 
-## When agents-core moves past v0.3.0
+## When agents-core moves past v0.3.1
 
 1. Read its CHANGELOG and README "Migrating from …" sections, then bump the pin in
    `pyproject.toml` (`uv add "agents-core @ git+https://github.com/Kghaffari26/agents-core@<tag>"`)
@@ -106,5 +108,5 @@ Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--max-usd N] 
    `.github/workflows/` together.
 2. Check STATUS.md's "Needed from agents-core" list against it (e.g. a
    `DownloadResult.headers` would let `gh.paginate` follow `Link` headers on cached
-   reads; a fixed `temperature` would let the fast tier pin one).
+   reads).
 3. Run the offline evals, then the live ones once, and commit the new history lines.

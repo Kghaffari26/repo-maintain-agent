@@ -529,7 +529,7 @@ Two jobs in `agent-repo-maint.yml`:
 - `report` runs when `vars.APPLY_CHANGES != 'true'`, with permissions `contents: write` (for the data commit), `issues: read`, `pull-requests: read` and `checks: read` (the CI signal in §5.6).
 - `apply` runs when `vars.APPLY_CHANGES == 'true'`, with `contents: write`, `issues: write`, `pull-requests: read` and `checks: read`, and passes `--apply` and `apply_changes: true`.
 
-Both call agents-core's `run-agent.yml@v0.3.0`, which declares no permissions of its own and so runs with exactly the calling job's grant. Fix-proposal PRs on the sandbox are written with `REPO_MAINT_TOKEN` (a fine-grained PAT for the sandbox only), never with the workflow token, so neither job grants `pull-requests: write`.
+Both call agents-core's `run-agent.yml@v0.3.1`, which declares no permissions of its own and so runs with exactly the calling job's grant. Fix-proposal PRs on the sandbox are written with `REPO_MAINT_TOKEN` (a fine-grained PAT for the sandbox only), never with the workflow token, so neither job grants `pull-requests: write`.
 
 ---
 
@@ -644,7 +644,7 @@ suites in `evals/repo_maint/suites.py`: `triage`, `injection`, `changelog` and
 `fix_proposer_replay` (offline, $0). `evals/repo_maint/ci.py` runs them under one
 total spend cap. Results go to `evals/results/<date>.json` and one line per suite
 to `evals/history.jsonl`. On PRs, `.github/workflows/evals.yml` runs
-`run-evals.yml@v0.3.0` ($1.00 cap) and fails on a regression of more than 0.05.
+`run-evals.yml@v0.3.1` ($1.00 total cap, agents-core's `total_max_usd`) and fails on a regression of more than 0.05.
 Scores are per case: duplicate confirmation is scored as per-case verdict accuracy,
 and "priority inflation" in the live injection eval counts only where the injection
 asks for a priority (inj-01).

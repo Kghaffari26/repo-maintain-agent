@@ -70,10 +70,11 @@ def test_injection_fixtures_count_is_four():
     assert len(INJECTION_FIXTURES) == 4
 
 
-def _run(suite, responses=(), **overrides):
+def _run(suite, responses=(), *, client=None, **overrides):
     if overrides:
         suite = dataclasses.replace(suite, **overrides)
-    return run_suite(suite, max_usd=1.0, llm_client=FakeAnthropic(list(responses)), write=False)
+    client = client or FakeAnthropic(list(responses))
+    return run_suite(suite, max_usd=1.0, llm_client=client, write=False)
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +112,26 @@ def test_ci_offline_runs_only_offline_suites(capsys):
     out = capsys.readouterr().out
     assert "repo_maint-injection_worst_case: pass_rate=1.000" in out
     assert "repo_maint-triage" not in out and "(offline)" in out
+
+
+def test_ci_passes_one_total_cap_to_run_suites(monkeypatch):
+    seen = {}
+
+    def fake_run_suites(plan, *, max_usd, total_max_usd, write):
+        seen.update(names=[s.name for s in plan], max_usd=max_usd, total=total_max_usd)
+        return []
+
+    monkeypatch.setattr(ci, "run_suites", fake_run_suites)
+    monkeypatch.delenv("AGENTS_CORE_EVAL_TOTAL_MAX_USD", raising=False)
+    assert ci.main(["--offline", "--no-write"]) == 0
+    assert seen["total"] == ci.DEFAULT_TOTAL_USD and seen["max_usd"] is None
+    assert seen["names"] == [s.name for s in suites.OFFLINE_SUITES if s.cases]
+
+    monkeypatch.setenv("AGENTS_CORE_EVAL_TOTAL_MAX_USD", "0.40")
+    assert ci.main(["--offline", "--no-write"]) == 0
+    assert seen["total"] == 0.40
+    assert ci.main(["--offline", "--no-write", "--total-max-usd", "0.2", "--max-usd", "0.1"]) == 0
+    assert seen["total"] == 0.2 and seen["max_usd"] == 0.1
 
 
 def test_ci_live_without_a_key_refuses(monkeypatch):
@@ -190,13 +211,17 @@ def test_live_fix_proposer_suite_applies_the_patch_runs_the_tests_and_judges(mon
     monkeypatch.setenv(suites.RECORD_ENV, "1")
     fix03 = next(c for c in suites.fix_cases() if c.id == "fix-03")
     judge = {"score": 5, "reasoning": "Minimal and correct."}
-    report = _run(suites.FIX_PROPOSER, [*FIX_SCRIPT, judge], cases=[fix03])
+    client = FakeAnthropic([*FIX_SCRIPT, judge])
+    report = _run(suites.FIX_PROPOSER, client=client, cases=[fix03])
     [case] = report.cases
     scores = {s.name: s for s in case.scores}
     assert scores["patch_fixes_bug"].passed, scores["patch_fixes_bug"].detail
     assert scores["required_tools_called"].passed and scores["forbidden_tools_not_called"].passed
     assert scores["max_steps"].passed and scores["stop_reason"].passed
     assert scores["llm_judge"].value == 1.0
+    judge_call = client.calls[-1]
+    assert judge_call["max_tokens"] == suites.FIX_JUDGE_MAX_TOKENS
+    assert judge_call["extra_body"]["temperature"] == 0  # the fast tier's (models.toml)
     saved = json.loads((tmp_path / "traj" / "fix-03.json").read_text())
     assert len(saved["responses"]) == len(FIX_SCRIPT)
 
