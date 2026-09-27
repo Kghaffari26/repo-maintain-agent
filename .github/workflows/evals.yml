@@ -1,0 +1,34 @@
+# The eval gate (SPEC_REPO_MAINT.md §11): on a PR that touches agent code, prompts,
+# evals or config, run the repo_maint suites through agents-core's run-evals.yml and
+# fail on a regression of more than 0.05 in any score against evals/history.jsonl.
+#
+# evals.repo_maint.ci always runs the offline suites ($0: worst-case injection, the
+# changelog guard, the recorded fix-proposer trajectories replayed). With the
+# ANTHROPIC_API_KEY secret available (not on PRs from forks) it also runs the live
+# suites (triage, injection, changelog, fix proposer with an LLM judge), all under
+# one spend cap: max_usd below, exported as AGENTS_CORE_EVAL_MAX_USD.
+name: Evals
+
+on:
+  pull_request:
+    paths:
+      - "agents/**"
+      - "evals/**"
+      - "config/**"
+      - "scripts/sandbox_package/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions: {}
+
+jobs:
+  evals:
+    permissions:
+      contents: read
+    uses: Kghaffari26/agents-core/.github/workflows/run-evals.yml@v0.3.0
+    with:
+      eval_command: uv run python -m evals.repo_maint.ci
+      max_usd: "1.00"
+      regression_threshold: "0.05"
+      paths: "agents/* evals/* config/* scripts/sandbox_package/* pyproject.toml uv.lock"
+    secrets: inherit

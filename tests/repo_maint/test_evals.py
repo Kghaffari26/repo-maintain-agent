@@ -1,19 +1,23 @@
-"""Tests for the evals.repo_maint fixture builders and runner (§11).
+"""Tests for the evals.repo_maint fixtures and agents_core.evals suites (§11, §6.1).
 
-These exercise the eval machinery itself (fixture shape, and that the
-free injection/changelog evals run and produce the expected result shape),
-plus the live evals' scoring functions and runners against a scripted model.
+Offline suites run for real here; live suites run against a scripted model
+(``FakeAnthropic``), so their tasks and scorers are exercised without spending.
 """
 
 from __future__ import annotations
 
-from agents.repo_maint.triage import TriageResult
-from evals.repo_maint import live_evals
+import dataclasses
+import json
+
+import pytest
+from agents_core.evals import run_suite
+
+from evals.repo_maint import ci, suites
 from evals.repo_maint.build_fixtures import build_fixtures, build_labels_proposed
 from evals.repo_maint.changelog_fixtures import CHANGELOG_FIXTURES
 from evals.repo_maint.injection_fixtures import INJECTION_FIXTURES
-from evals.repo_maint.run_evals import run_changelog_fidelity, run_injection_resistance
-from tests.repo_maint.fakes import fake_llm
+from tests.repo_maint.fakes import FakeAnthropic
+from tests.repo_maint.test_fix_proposer import FIX_SCRIPT
 
 
 def test_build_fixtures_produces_exactly_40():
@@ -66,125 +70,134 @@ def test_injection_fixtures_count_is_four():
     assert len(INJECTION_FIXTURES) == 4
 
 
-def test_run_injection_resistance_passes_every_fixture():
-    """The real, executed eval (§11): a worst-case fully-compliant raw model
-    output run through our own code must never let the disallowed parts
-    survive."""
-    result = run_injection_resistance()
-    assert result["status"] == "ran"
-    assert result["fixtures_total"] == 4
-    assert result["all_passed"] is True
+def _run(suite, responses=(), **overrides):
+    if overrides:
+        suite = dataclasses.replace(suite, **overrides)
+    return run_suite(suite, max_usd=1.0, llm_client=FakeAnthropic(list(responses)), write=False)
 
 
-def test_changelog_fixtures_count_is_three():
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTS_CORE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AGENTS_CORE_EVALS_DIR", str(tmp_path / "evals"))
+
+
+# -- offline suites -------------------------------------------------------------------------
+
+
+def test_injection_worst_case_suite_defends_every_fixture():
+    """A fully compliant model output, through our own code, never lets the
+    disallowed parts survive."""
+    report = _run(suites.INJECTION_WORST_CASE)
+    assert report.n_scored == 4 and report.pass_rate == 1.0 and report.usd == 0
+
+
+def test_changelog_guard_suite_takes_the_expected_path_on_each_fixture():
     assert len(CHANGELOG_FIXTURES) == 3
+    report = _run(suites.CHANGELOG_GUARD)
+    assert report.pass_rate == 1.0
+    assert report.scores == {"ref_coverage": 1.0, "narrative_source": 1.0, "guard_path": 1.0}
 
 
-def test_run_changelog_fidelity_has_full_ref_coverage_on_all_fixtures():
-    result = run_changelog_fidelity()
-    assert result["status"] == "ran"
-    assert result["ref_coverage_ok_on_all_fixtures"] is True
-    assert len(result["findings"]) == 3
+def test_fix_proposer_replay_suite_reruns_recorded_trajectories_offline():
+    report = _run(suites.FIX_PROPOSER_REPLAY)
+    assert report.usd == 0
+    assert report.n_scored == len(suites.recorded_fix_cases())
+    assert report.scores.get("forbidden_tools_not_called", 1.0) == 1.0
 
 
-# -- live-eval scoring (evals/repo_maint/live_evals.py) ------------------------------------
+def test_ci_offline_runs_only_offline_suites(capsys):
+    assert ci.main(["--offline", "--no-write"]) == 0
+    out = capsys.readouterr().out
+    assert "repo_maint-injection_worst_case: pass_rate=1.000" in out
+    assert "repo_maint-triage" not in out and "(offline)" in out
 
 
-
-def _result(number=1, classification="bug", priority="p2", labels=()):
-    return TriageResult(
-        number=number,
-        classification=classification,
-        priority=priority,
-        confidence="high",
-        suggested_labels=list(labels),
-    )
+def test_ci_live_without_a_key_refuses(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTS_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(ci.settings, "load_dotenv", lambda *a, **k: None)
+    assert ci.main(["--live", "--no-write"]) == 2
 
 
-def _key(**entries):
-    return {
-        fid: {"expected": {"classification": c, "priority_band": p, "duplicate_of": d}}
-        for fid, (c, p, d) in entries.items()
-    }
+# -- live suites, scripted -------------------------------------------------------------------
 
 
-def test_score_classification_counts_exact_matches():
-    key = _key(a=("bug", "p2", None), b=("feature", "p3", None))
-    score = live_evals.score_classification({"a": _result(), "b": _result()}, key)
-    assert score["accuracy"] == 0.5
-    assert score["passed"] is False
-    assert score["misses"] == [{"id": "b", "expected": "feature", "got": "bug"}]
-
-
-def test_score_priority_within_one_and_security_rule():
-    key = _key(a=("bug", "p2", None), s=("bug", "p1", None))
-    results = {"a": _result(priority="p3"), "s": _result(priority="p2")}
-    score = live_evals.score_priority(results, key, security_ids={"s"})
-    assert score["within_one_rate"] == 1.0
-    assert score["security_all_p0_p1"] is False
-    assert score["passed"] is False
-
-
-def test_score_label_allowlist_reports_raw_rate():
-    raw = {"a": {"suggested_labels": ["bug", "made-up"]}}
-    score = live_evals.score_label_allowlist(raw, {"a": _result(labels=["bug"])}, {"bug"})
-    assert score["raw_model_allowlisted_rate"] == 0.5
-    assert score["raw_labels_outside_allowlist"] == ["made-up"]
-    assert score["passed"] is True
-
-
-def test_score_duplicates_precision_over_candidate_pairs():
-    fixtures = [
-        {"id": "a", "number": 1, "candidates": ["b"]},
-        {"id": "b", "number": 2, "candidates": ["a"]},
-        {"id": "c", "number": 3, "candidates": ["a"]},
-    ]
-    key = _key(a=("bug", "p2", "b"), b=("bug", "p2", "a"), c=("bug", "p2", None))
-    raw = {
-        "a": {"duplicates": [{"number": 2, "duplicate_likely": True}]},
-        "b": {"duplicates": [{"number": 1, "duplicate_likely": False}]},
-        "c": {"duplicates": [{"number": 1, "duplicate_likely": True}]},
-    }
-    score = live_evals.score_duplicates(raw, fixtures, key)
-    assert score["precision"] == 0.5  # 1 true positive, 1 false positive
-    assert score["recall"] == 0.5  # b->a missed
-    assert score["passed"] is False
-
-
-def test_run_triage_fixtures_uses_the_production_classify_path(tmp_path):
-    fixtures = [
-        {
-            "id": "fx-1",
-            "number": 1,
-            "title": "Crash",
-            "body": "It crashes.",
-            "author_association": "NONE",
-            "kind": "bug_no_repro",
-        }
-    ]
-    output = {
+def _triage_answer(**overrides):
+    answer = {
         "classification": "bug",
         "priority": "p2",
         "confidence": "high",
-        "suggested_labels": ["bug", "nope"],
+        "suggested_labels": ["bug", "not-a-label"],
         "missing_info": [],
-        "summary": "Crash.",
+        "summary": "Map is blank.",
         "duplicates": [],
         "first_response": "Thanks!",
     }
-    llm, client = fake_llm([output], tmp_path)
-    raw, results = live_evals.run_triage_fixtures(llm, fixtures)
-    assert raw["fx-1"]["suggested_labels"] == ["bug", "nope"]
-    assert results["fx-1"].suggested_labels == ["bug"]
-    assert len(client.calls) == 1
+    return {**answer, **overrides}
 
 
-def test_run_live_changelog_scores_first_attempts(tmp_path):
-    responses = []
-    for fixture in CHANGELOG_FIXTURES:
-        refs = " ".join(f"({item.ref})" for item in fixture["items"])
-        responses.append(f"## [Unreleased]\n### Other\n- Everything {refs}\n")
-    llm, _client = fake_llm(responses, tmp_path)
-    result = live_evals.run_live_changelog(llm)
-    assert result["first_attempt_rate"] == 1.0
-    assert result["ref_coverage_ok_on_all_fixtures"] is True
+def test_triage_suite_scores_each_dimension():
+    cases = suites.triage_cases()
+    assert len(cases) == 40
+    first = cases[0]  # fx-001: a bug with repro, expected p2
+    report = _run(suites.TRIAGE, [_triage_answer()], cases=[first])
+    [case] = report.cases
+    scores = {s.name: s for s in case.scores}
+    assert scores["classification"].passed and scores["priority_within_one"].passed
+    assert scores["labels_allowlisted"].passed and scores["labels_allowlisted"].value == 0.5
+    assert scores["security_p0_p1"].passed and scores["duplicate_verdicts"].passed
+
+    dup = next(c for c in cases if c.expected["duplicates"])
+    [(number, want)] = dup.expected["duplicates"].items()
+    wrong = [{"number": int(number), "duplicate_likely": not want}]
+    report = _run(suites.TRIAGE, [_triage_answer(duplicates=wrong)], cases=[dup])
+    assert {s.name: s.passed for s in report.cases[0].scores}["duplicate_verdicts"] is False
+
+
+def test_live_injection_suite_passes_inj01_with_title_only_escalation():
+    """Regression for the 2026-09-26 live finding: the model answered p3 for inj-01
+    and our own code used to raise it to p1."""
+    inj01 = next(c for c in suites.injection_cases() if c.id == "inj-01")
+    model = _triage_answer(priority="p3", suggested_labels=["bug"])
+    report = _run(suites.INJECTION, [model], cases=[inj01])
+    assert report.pass_rate == 1.0
+    inflated = _run(suites.INJECTION, [_triage_answer(priority="p0")], cases=[inj01])
+    assert "priority inflated to p0" in inflated.cases[0].scores[0].detail
+
+
+def test_live_changelog_suite_scores_first_attempt_and_coverage():
+    chg01 = suites.changelog_cases()[0]
+    good = "## [Unreleased]\n### Added\n- Metro compare (#101)\n### Fixed\n- Empty filter (#102)\n### Other\n- Lockfile (#103)\n"  # noqa: E501
+    report = _run(suites.CHANGELOG, [good], cases=[chg01])
+    assert report.scores == {"ref_coverage": 1.0, "first_attempt": 1.0}
+
+
+def test_live_fix_proposer_suite_applies_the_patch_runs_the_tests_and_judges(monkeypatch, tmp_path):
+    monkeypatch.setattr(suites, "TRAJECTORIES_DIR", tmp_path / "traj")
+    monkeypatch.setenv(suites.RECORD_ENV, "1")
+    fix03 = next(c for c in suites.fix_cases() if c.id == "fix-03")
+    judge = {"score": 5, "reasoning": "Minimal and correct."}
+    report = _run(suites.FIX_PROPOSER, [*FIX_SCRIPT, judge], cases=[fix03])
+    [case] = report.cases
+    scores = {s.name: s for s in case.scores}
+    assert scores["patch_fixes_bug"].passed, scores["patch_fixes_bug"].detail
+    assert scores["required_tools_called"].passed and scores["forbidden_tools_not_called"].passed
+    assert scores["max_steps"].passed and scores["stop_reason"].passed
+    assert scores["llm_judge"].value == 1.0
+    saved = json.loads((tmp_path / "traj" / "fix-03.json").read_text())
+    assert len(saved["responses"]) == len(FIX_SCRIPT)
+
+
+def test_a_patch_that_does_not_fix_the_bug_fails_the_suite():
+    fix01 = next(c for c in suites.fix_cases() if c.id == "fix-01")  # money, not pagination
+    judge = {"score": 1, "reasoning": "Wrong file."}
+    report = _run(suites.FIX_PROPOSER, [*FIX_SCRIPT, judge], cases=[fix01])
+    scores = {s.name: s for s in report.cases[0].scores}
+    assert not scores["patch_fixes_bug"].passed and not report.cases[0].passed
+
+
+def test_fix_cases_cover_the_five_sandbox_bugs():
+    cases = suites.fix_cases()
+    assert [c.id for c in cases] == ["fix-01", "fix-02", "fix-03", "fix-04", "fix-05"]
+    assert all((suites.CHECKS_DIR / f"test_{c.id.replace('-', '_')}.py").is_file() for c in cases)
