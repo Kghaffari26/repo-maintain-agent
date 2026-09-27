@@ -1,8 +1,0 @@
-# Overrides for agents-core's shipped config/models.toml (deep-merged; only what
-# differs). Per-tier temperature needs agents-core >= v0.2.0.
-
-# Triage classification and the eval judge run on the fast tier: temperature 0 so
-# the same issue text gets the same labels run to run (the triage cache already
-# relies on that). The smart tier (changelog, fix proposer) keeps the model default.
-[tiers.fast]
-temperature = 0

@@ -210,3 +210,12 @@ def test_a_malformed_approval_fails_the_run_before_any_request(agent):
     requests: list[httpx.Request] = []
     assert _run(agent, requests=requests, extra_args=["--approve-fix", "nope"]) == 1
     assert requests == []
+
+
+def test_no_tier_sets_a_sampling_parameter_the_sdk_rejects():
+    """anthropic>=1.8 rejects `temperature`; agents-core sends a tier's temperature
+    when models.toml sets one, so every tier must leave it unset (see DECISIONS.md)."""
+    from agents_core.llm import tier_config
+
+    assert tier_config("fast").temperature is None
+    assert tier_config("smart").temperature is None

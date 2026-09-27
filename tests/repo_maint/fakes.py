@@ -6,11 +6,13 @@ client object it would otherwise build. Nothing here is shipped in ``agents``.
 
 from __future__ import annotations
 
+import inspect
 import itertools
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import anthropic
 import httpx
 from agents_core.costs import CostTracker
 from agents_core.http import Http
@@ -41,6 +43,17 @@ def gh_client(handler, **kwargs: Any) -> GitHubClient:
 # -- a scripted Anthropic client for agents_core.llm ---------------------------------------
 
 
+def _check_sdk_kwargs(method: str, kwargs: dict[str, Any]) -> None:
+    """Reject what the real SDK would: every kwarg must be a parameter of the installed
+    ``anthropic`` ``Messages.create``/``parse``. (A live eval caught agents-core sending
+    ``temperature``, which anthropic 1.8 no longer accepts; a lenient fake had hidden it.)"""
+    real = getattr(anthropic.resources.messages.Messages, method)
+    allowed = set(inspect.signature(real).parameters)
+    unknown = sorted(set(kwargs) - allowed)
+    if unknown:
+        raise TypeError(f"Messages.{method}() got unexpected keyword arguments {unknown}")
+
+
 class FakeAnthropic:
     """Stands in for ``anthropic.Anthropic`` inside ``agents_core.llm.LLM``.
 
@@ -64,7 +77,8 @@ class FakeAnthropic:
         self.messages = SimpleNamespace(create=self._create, parse=self._parse)
         self._ids = itertools.count(1)
 
-    def _next(self, kwargs: dict[str, Any]) -> Any:
+    def _next(self, kwargs: dict[str, Any], method: str) -> Any:
+        _check_sdk_kwargs(method, kwargs)
         self.calls.append(kwargs)
         if not self._responses:
             raise AssertionError("FakeAnthropic ran out of scripted responses")
@@ -79,7 +93,7 @@ class FakeAnthropic:
         )
 
     def _create(self, **kwargs: Any) -> SimpleNamespace:
-        value = self._next(kwargs)
+        value = self._next(kwargs, "create")
         if isinstance(value, dict) and "content" in value:
             message = self._message(content=[SimpleNamespace(**b) for b in value["content"]])
             message.stop_reason = value.get("stop_reason", "tool_use")
@@ -87,7 +101,7 @@ class FakeAnthropic:
         return self._message(content=[SimpleNamespace(type="text", text=value)])
 
     def _parse(self, *, output_format: Any, **kwargs: Any) -> SimpleNamespace:
-        value = self._next({**kwargs, "output_format": output_format})
+        value = self._next({**kwargs, "output_format": output_format}, "parse")
         if isinstance(value, dict):
             value = output_format.model_validate(value)
         return self._message(content=[], parsed_output=value)
