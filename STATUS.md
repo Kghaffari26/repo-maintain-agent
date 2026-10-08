@@ -1,9 +1,30 @@
-# Status — session 2026-09-27 (agents-core v0.3.1, fix proposer, evals, tracing)
+# Status — session 2026-10-08 (agents-core v0.3.2)
 
 Read this first. `DECISIONS.md` has the reasoning behind every judgment call
-referenced here (this session's are under "Session 2026-09-27" and "(2): agents-core v0.3.1").
+referenced here (this session's are under "Session 2026-10-08: agents-core v0.3.2";
+earlier ones under "Session 2026-09-27" and "(2): agents-core v0.3.1").
 
-## Upgrade to agents-core v0.3.1 (latest)
+## Upgrade to agents-core v0.3.2 (latest, 2026-10-08)
+
+- **Pinned by commit SHA** `9e4f342a06b4e74bb27d73cf759e931033fa97bf` in
+  `pyproject.toml`/`uv.lock` and all three workflow `uses:` refs, because the `v0.3.2`
+  tag doesn't exist yet. Swap to `@v0.3.2` once a human tags it (same commit).
+- **Cached list reads follow `Link: rel="next"`** (`DownloadResult.links`) instead of
+  guessing `page=N` until a short page. The first page is still conditional, and a 304
+  still serves `<key>.pages.json` for that ETag. Conditional reads, 304s included, now
+  update the rate-limit floor from `DownloadResult.headers`.
+- **406 tests passing** (398 before; +8 in `test_gh_client.py`), ruff clean, actionlint
+  clean.
+- Evals at commit `30c6a5b` (`dirty: false`): offline 3/3 suites at 1.0 ($0). Live once:
+  **$0.1443** in total. triage 0.95 (same misses as before, fx-026 and fx-031), $0.0688;
+  injection 4/4, $0.0065; changelog 1.0, $0.0044; fix_proposer 5/5, judge 1.0, $0.0647.
+  `agents-evals compare`: every delta +0.000, 0 regressions. Spend matches 2026-09-27.
+- Zero GitHub writes: no `--apply`, no real `agents-run`, seed script not run. The live
+  evals read only local fixtures (`LocalRepoSource` on a temp copy of the sandbox package).
+- Needed from agents-core: item 2 (`DownloadResult.headers`) is fixed in v0.3.2;
+  nothing is outstanding.
+
+## Upgrade to agents-core v0.3.1 (2026-09-27)
 
 - Pin and all three workflow `uses:` refs are `@v0.3.1`.
 - **Temperature is back** on the fast tier (`config/models.toml`, 0 for triage and
@@ -113,15 +134,14 @@ The failing check run on `main` from last session no longer shows.
 
 ## Needed from agents-core (not modified from here)
 
+Nothing is open. Items 1 and 3 were fixed in v0.3.1 (kept below for history); item 2
+(`DownloadResult.headers`) was fixed in v0.3.2 and has been removed.
+
 1. **`temperature` is incompatible with its own SDK pin.** agents-core v0.2.0+
    sends a tier's `temperature` (models.toml) or a per-call `temperature=` to
    `messages.create`/`parse`, but anthropic 1.8 (which it requires) accepts neither.
    Any agent that sets it breaks. Either drop the feature or gate it per model. This
    repo sets no temperature (see case study 2).
-2. **`Http.download` returns no response headers**, so an agent can't see rate-limit
-   headers or `Link` pagination on conditional reads. Exposing `headers` on
-   `DownloadResult` would let this repo drop its page-number pagination for cached
-   lists.
 3. (Minor) `LLMJudge` has no `max_tokens`/temperature control and uses the tier
    default of 4096 output tokens, which inflates its pre-call worst-case estimate.
 
