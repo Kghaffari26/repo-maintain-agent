@@ -50,6 +50,11 @@ NO_KEY_WARNING = (
     "ANTHROPIC_API_KEY is not set: issues were left untriaged (unscored), changelogs"
     " use the template grouping, and no fixes were proposed"
 )
+REJECTED_KEY_WARNING = (
+    "The Anthropic API rejected ANTHROPIC_API_KEY (HTTP {status}): issues were left"
+    " untriaged (unscored), changelogs use the template grouping, and no fixes were"
+    " proposed. Update the secret."
+)
 
 #: `--repos a/b,c/d` (forwarded by agents-run as an extra arg) narrows a run, §10.
 REPOS_FLAG = "--repos"
@@ -86,14 +91,32 @@ def approved_fix_ids(extra_args: list[str]) -> set[str]:
     return ids
 
 
-def llm_available(llm: LLM) -> bool:
-    """False when no Anthropic key is configured (``LLM.client`` can't be built), so
-    the run publishes template/unscored output with a warning instead of crashing."""
+def llm_key_problem(llm: LLM) -> str | None:
+    """Why the LLM can't be used this run (the warning to publish), or None if it can.
+
+    No key: ``LLM.client`` raises RuntimeError. A key the API rejects (revoked, or a
+    mistyped secret) would instead fail each call with a 401/403, which isn't an
+    ``LLMError``, and crash the run; it's checked once up front with a free
+    ``models.list`` request (real SDK clients only, not injected fakes). Network trouble
+    or a 5xx is left to the real calls."""
     try:
-        llm.client  # noqa: B018 - builds the SDK client, raising without a key
+        client = llm.client  # builds the SDK client, raising without a key
     except RuntimeError:
-        return False
-    return True
+        return NO_KEY_WARNING
+    if type(client).__module__.split(".")[0] != "anthropic":
+        return None
+    try:
+        client.models.list(limit=1)
+    except Exception as exc:  # noqa: BLE001 -- the SDK's error types, without importing it
+        status = getattr(exc, "status_code", None)
+        if status in (401, 403):
+            return REJECTED_KEY_WARNING.format(status=status)
+    return None
+
+
+def llm_available(llm: LLM) -> bool:
+    """False when the run should publish template/unscored output with a warning."""
+    return llm_key_problem(llm) is None
 
 
 def github_cache_dir(state_path: Path, full_name: str) -> Path:
@@ -224,9 +247,10 @@ class RepoMaintAgent(Agent):
 
     def analyze(self, ctx: RunContext, data: Computed) -> AgentResult:
         fetched = data.fetched
-        use_llm = llm_available(ctx.llm)
-        if not use_llm:
-            ctx.warn(NO_KEY_WARNING)
+        llm_problem = llm_key_problem(ctx.llm)
+        use_llm = llm_problem is None
+        if llm_problem:
+            ctx.warn(llm_problem)
 
         def classify_factory(
             repo: RepoConfig, description: str | None, labels: set[str]

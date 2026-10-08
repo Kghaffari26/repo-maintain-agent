@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -228,3 +229,32 @@ def test_the_fast_tier_pins_temperature_zero_in_the_request_body(tmp_path):
     assert "temperature" not in client.calls[0]
     assert client.calls[0]["extra_body"]["temperature"] == 0
     assert "temperature" not in client.calls[1].get("extra_body", {})
+
+
+class _RejectedKeyAnthropic(FakeAnthropic):
+    """A real-looking SDK client (by module name) whose key the API rejects."""
+
+    __module__ = "anthropic._client"
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.model_lists = 0
+
+        def list_models(**_kw):
+            self.model_lists += 1
+            error = type("AuthenticationError", (Exception,), {"status_code": 401})
+            raise error("invalid x-api-key")
+
+        self.models = SimpleNamespace(list=list_models)
+
+
+def test_rejected_api_key_publishes_ok_with_a_warning(agent, tmp_path):
+    """A 401 isn't an LLMError, so a bad key would crash the run; the preflight catches
+    it and the run degrades exactly like a missing key."""
+    client = _RejectedKeyAnthropic()
+    assert runner.run(agent, http=mock_http(make_handler()), llm_client=client) == 0
+    assert client.model_lists == 1
+    latest = json.loads((tmp_path / "public-data" / "latest.json").read_text())
+    assert latest["meta"]["status"] == "ok"
+    assert any("rejected ANTHROPIC_API_KEY (HTTP 401)" in w for w in latest["meta"]["warnings"])
+    assert latest["repos"][0]["changelog"]["narrative_source"] == "template"

@@ -92,6 +92,7 @@ One line per reasonable-default choice made without asking, newest last.
 - Live spend: one smoke check (one fast-tier `complete` + one `structured`, temperature 0) = $0.00027, logged to the scratchpad, not `data/costs.jsonl`. No live evals, so `evals/history.jsonl` and the recorded trajectories are unchanged (the fix loop's prompt/tools didn't change; the judge only gained a token cap).
 - Left 9 pre-existing `ruff format` diffs alone (the rule is `ruff check`, which is clean); not this upgrade's scope.
 - Pushed to `main` as asked (the user's explicit instruction overrides the session's default feature branch) and also to the session branch; read "zero write requests to GitHub" as the agent/API writes (issues, labels, comments, PRs) and the seed script, none of which ran — `git push` of these commits is the requested delivery.
+- A rejected Anthropic key (401/403) degrades the run like a missing one: `llm_key_problem` makes one free `models.list` preflight (real SDK clients only) and publishes template/unscored output with a warning naming the secret; 401/403 are not `LLMError`s, so a bad key would otherwise crash the run.
 
 ## Session 2026-10-08: agents-core v0.3.2
 
