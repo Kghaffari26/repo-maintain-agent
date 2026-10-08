@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agents_core.http import Http, HttpError
+from agents_core.http import Http, HttpError, parse_link_header
 
 from agents.repo_maint.config import FixPRApproval
 
@@ -143,6 +143,17 @@ class _Result:
     body: Any
 
 
+@dataclass
+class _Download:
+    """A conditional read's outcome: the body (the previous one on a 304), its ETag,
+    and the ``Link`` header's ``rel="next"`` URL from this response (on a 304 too)."""
+
+    body: Any
+    etag: str | None
+    not_modified: bool
+    next_url: str | None
+
+
 def _url(path: str) -> str:
     return path if path.startswith("http") else f"{GITHUB_API_BASE}{path}"
 
@@ -209,9 +220,9 @@ class GitHubClient:
 
     def _download(
         self, path: str, cache_key: str, params: dict[str, Any] | None, *, force: bool = False
-    ) -> tuple[Any, str | None, bool] | None:
-        """A conditional GET through ``Http.download``. Returns ``(body, etag,
-        not_modified)``, or None for a 404/409 ("nothing here")."""
+    ) -> _Download | None:
+        """A conditional GET through ``Http.download``, or None for a 404/409 ("nothing
+        here"). Its response headers (a 304's too) update the rate-limit tracking."""
         self._check_rate_limit()
         dest = self._cache_path(cache_key)
         try:
@@ -223,9 +234,7 @@ class GitHubClient:
             if e.status in EMPTY_STATUSES:
                 return None
             raise GitHubRequestError(f"GET {path} failed: {e}") from e
-        # Http.download doesn't expose response headers, so rate-limit tracking comes
-        # from the unconditional reads (304s don't count against GitHub's limit anyway).
-        self._record({})
+        self._record(result.headers)
         if not result.modified:
             self.not_modified_count += 1
         try:
@@ -234,7 +243,7 @@ class GitHubClient:
             if force:
                 raise GitHubRequestError(f"GET {path}: unreadable response body") from None
             return self._download(path, cache_key, params, force=True)
-        return body, result.etag, not result.modified
+        return _Download(body, result.etag, not result.modified, result.links.get("next"))
 
     # -- reads ------------------------------------------------------------
 
@@ -253,8 +262,7 @@ class GitHubClient:
         got = self._download(path, cache_key, params)
         if got is None:
             return Page(items=[], etag=None, not_modified=False)
-        body, etag, not_modified = got
-        return Page(items=_as_items(body), etag=etag, not_modified=not_modified)
+        return Page(items=_as_items(got.body), etag=got.etag, not_modified=got.not_modified)
 
     def paginate(
         self, path: str, *, params: dict[str, Any] | None = None, cache_key: str | None = None
@@ -264,8 +272,9 @@ class GitHubClient:
         With a ``cache_key``, the first page is a conditional GET: a 304 there means
         the whole collection is unchanged (these endpoints are polled sorted by
         ``updated``), and all pages are read back from ``<key>.pages.json``, which
-        records the first page's ETag it belongs to. Without one, ``Link: rel="next"``
-        headers are followed.
+        records the first page's ETag it belongs to. Otherwise the first page is
+        re-read and the rest follow its ``Link: rel="next"`` headers (unconditional
+        reads, like every page without a ``cache_key``).
         """
         page_params: dict[str, Any] = dict(params or {})
         page_params.setdefault("per_page", 100)
@@ -276,47 +285,39 @@ class GitHubClient:
         got = self._download(path, cache_key, page_params)
         if got is None:
             return Page(items=[], etag=None, not_modified=False)
-        first, etag, not_modified = got
-        if not_modified:
+        if got.not_modified:
             saved = _read_pages(pages_path)
-            if saved is not None and saved.get("etag") == etag:
-                return Page(items=saved["items"], etag=etag, not_modified=True)
+            if saved is not None and saved.get("etag") == got.etag:
+                return Page(items=saved["items"], etag=got.etag, not_modified=True)
             # The pages file is missing or belongs to another ETag: fetch it all again.
             got = self._download(path, cache_key, page_params, force=True)
             if got is None:
                 return Page(items=[], etag=None, not_modified=False)
-            first, etag, _ = got
 
-        items = list(first) if isinstance(first, list) else []
-        per_page = int(page_params["per_page"])
-        number = 1
-        last_count = len(items)
-        while last_count >= per_page:
-            number += 1
-            result = self._get(path, params={**page_params, "page": number})
-            if result.status in EMPTY_STATUSES or not isinstance(result.body, list):
-                break
-            items.extend(result.body)
-            last_count = len(result.body)
-        pages_path.write_text(json.dumps({"etag": etag, "items": items}))
-        return Page(items=items, etag=etag, not_modified=False)
+        items = list(got.body) if isinstance(got.body, list) else []
+        items.extend(self._follow_next(got.next_url))
+        pages_path.write_text(json.dumps({"etag": got.etag, "items": items}))
+        return Page(items=items, etag=got.etag, not_modified=False)
 
     def _paginate_links(self, path: str, page_params: dict[str, Any]) -> Page:
-        all_items: list[dict[str, Any]] = []
-        next_path: str | None = path
-        first_page_etag: str | None = None
-        first = True
-        while next_path:
-            result = self._get(next_path, params=page_params if first else None)
+        result = self._get(path, params=page_params)
+        if result.status in EMPTY_STATUSES:
+            return Page(items=[], etag=None, not_modified=False)
+        items = list(result.body) if isinstance(result.body, list) else []
+        items.extend(self._follow_next(_next_link(result.headers)))
+        return Page(items=items, etag=result.headers.get("etag"), not_modified=False)
+
+    def _follow_next(self, next_url: str | None) -> list[dict[str, Any]]:
+        """Every item on the pages after the first, following ``Link: rel="next"``."""
+        items: list[dict[str, Any]] = []
+        while next_url:
+            result = self._get(next_url)
             if result.status in EMPTY_STATUSES:
                 break
             if isinstance(result.body, list):
-                all_items.extend(result.body)
-            if first:
-                first_page_etag = result.headers.get("etag")
-            next_path = _next_link(result.headers.get("link"))
-            first = False
-        return Page(items=all_items, etag=first_page_etag, not_modified=False)
+                items.extend(result.body)
+            next_url = _next_link(result.headers)
+        return items
 
     # -- writes: the ONLY three write operations this client exposes ------
 
@@ -439,16 +440,6 @@ def _check_draft_pr(owner: str, repo: str, pr: DraftPR, approval: FixPRApproval)
         raise ValueError("a fix-proposal PR needs at least one file change")
 
 
-def _next_link(link_header: str | None) -> str | None:
-    """Parse a GitHub ``Link`` header and return the ``rel="next"`` URL, if any."""
-    if not link_header:
-        return None
-    for part in link_header.split(","):
-        segment = part.strip()
-        if 'rel="next"' not in segment:
-            continue
-        start = segment.find("<")
-        end = segment.find(">")
-        if start != -1 and end != -1:
-            return segment[start + 1 : end]
-    return None
+def _next_link(headers: dict[str, str]) -> str | None:
+    """The ``Link`` header's ``rel="next"`` URL, if any (agents-core's parser)."""
+    return parse_link_header(headers.get("link", "")).get("next")

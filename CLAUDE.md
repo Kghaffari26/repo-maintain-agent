@@ -12,8 +12,9 @@ reasoned deviation.
 state of the build and the reasoning behind every non-obvious choice —
 don't re-derive decisions that are already logged there.
 
-It's an agents-core agent: `agents-core` is pinned at `v0.3.1` in
-`pyproject.toml`; its README, CHANGELOG and CLAUDE.md define the agent contract,
+It's an agents-core agent: `agents-core` is pinned at v0.3.2 in `pyproject.toml`, by
+commit SHA `9e4f342a06b4e74bb27d73cf759e931033fa97bf` until the `v0.3.2` tag exists
+(the workflows' `uses:` refs too); its README, CHANGELOG and CLAUDE.md define the agent contract,
 the number guard, the agent loop, tracing, evals and the data-branch contract. Don't modify agents-core from here —
 if it's missing something, list it under "Needed from agents-core" in STATUS.md.
 
@@ -100,13 +101,13 @@ Evals: `uv run python -m evals.repo_maint.ci [--offline | --live] [--total-max-u
 - Tests never write into the repo's `data/`/`evals/`/`public-data/`
   (`tests/conftest.py`), and each mocked `Http` gets its own cache dir.
 
-## When agents-core moves past v0.3.1
+## When agents-core moves past v0.3.2
 
+0. Once the `v0.3.2` tag exists, the SHA pin can be swapped for `@v0.3.2` (same
+   commit, `9e4f342`) in `pyproject.toml` (then `uv lock`) and the three `uses:` refs.
 1. Read its CHANGELOG and README "Migrating from …" sections, then bump the pin in
-   `pyproject.toml` (`uv add "agents-core @ git+https://github.com/Kghaffari26/agents-core@<tag>"`)
-   and every `uses: ...run-agent.yml@<tag>` / `run-evals.yml@<tag>` line in
+   `pyproject.toml` (`[tool.uv.sources]` `rev = "<tag or SHA>"`, then `uv lock`)
+   and every `uses: ...run-agent.yml@<ref>` / `run-evals.yml@<ref>` line in
    `.github/workflows/` together.
-2. Check STATUS.md's "Needed from agents-core" list against it (e.g. a
-   `DownloadResult.headers` would let `gh.paginate` follow `Link` headers on cached
-   reads).
+2. Check STATUS.md's "Needed from agents-core" list against it.
 3. Run the offline evals, then the live ones once, and commit the new history lines.

@@ -25,7 +25,7 @@ jobs:
   evals:
     permissions:
       contents: read
-    uses: Kghaffari26/agents-core/.github/workflows/run-evals.yml@v0.3.1
+    uses: Kghaffari26/agents-core/.github/workflows/run-evals.yml@9e4f342a06b4e74bb27d73cf759e931033fa97bf
     with:
       eval_command: uv run python -m evals.repo_maint.ci
       max_usd: "1.00"

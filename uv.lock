@@ -4,8 +4,8 @@ requires-python = "==3.12.*"
 
 [[package]]
 name = "agents-core"
-version = "0.3.1"
-source = { git = "https://github.com/Kghaffari26/agents-core?rev=v0.3.1#dba5e8613c65e74c9a10f09dcfe8d55ee667f8cb" }
+version = "0.3.2"
+source = { git = "https://github.com/Kghaffari26/agents-core?rev=9e4f342a06b4e74bb27d73cf759e931033fa97bf#9e4f342a06b4e74bb27d73cf759e931033fa97bf" }
 dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
@@ -355,7 +355,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agents-core", git = "https://github.com/Kghaffari26/agents-core?rev=v0.3.1" },
+    { name = "agents-core", git = "https://github.com/Kghaffari26/agents-core?rev=9e4f342a06b4e74bb27d73cf759e931033fa97bf" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "scikit-learn", specifier = ">=1.5" },
 ]

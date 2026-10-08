@@ -52,7 +52,8 @@ scores repo health and, on a sandbox repo, proposes fixes for small bugs as
 - **Numbers come from code.** Health scores, counts, deltas and line counts are
   computed in `transform`; the model only writes narrative about them.
 
-It's an agents-core agent pinned at **v0.3.1**, registered as `repo_maint`.
+It's an agents-core agent pinned at **v0.3.2** (by commit SHA `9e4f342` until the
+`v0.3.2` tag exists), registered as `repo_maint`.
 **Start here:** [`STATUS.md`](STATUS.md) (current state, what needs a human),
 [`DECISIONS.md`](DECISIONS.md) (every judgment call), and
 [`docs/case-studies.md`](docs/case-studies.md) (bugs the evals, guards and live runs
@@ -166,7 +167,7 @@ proposals) and `repo_maint/github/` (conditional-read bodies + ETags from
 | `agent.py` | The `agents_core.agent.Agent`: fetch → transform → analyze; no-key fallback; `--repos`, `--approve-fix` |
 | `pipeline.py` | The three stages per repo, per-repo failure isolation, warnings, key-stat deltas, tracing spans |
 | `config.py` | `config/repos.toml`, the five write gates, `approve_fix_pr` (the fix-PR gate) |
-| `gh.py` | GitHub REST over `agents_core.http.Http`: conditional reads via `Http.download`, pagination, rate-limit floor, exactly three writes |
+| `gh.py` | GitHub REST over `agents_core.http.Http`: conditional reads via `Http.download`, `Link`-header pagination (cached lists too), rate-limit floor, exactly three writes |
 | `fetch.py` | All reads for one repo into a `RepoSnapshot`; commits since a date |
 | `untriaged.py`, `metrics.py`, `duplicates.py`, `stale.py`, `health.py` | Deterministic computations (§5) |
 | `triage.py` | The §7.2 prompt (fast tier), post-processing, title-only security escalation, number guard, caching |
@@ -182,14 +183,14 @@ proposals) and `repo_maint/github/` (conditional-read bodies + ETags from
 
 - `.github/workflows/agent-repo-maint.yml`: daily at 07:00 PT and on dispatch
   (inputs `repos`, `approve_fix`). Two least-privilege jobs call
-  `run-agent.yml@v0.3.1`: `report` (`contents: write`, `issues: read`,
+  `run-agent.yml@9e4f342…` (v0.3.2): `report` (`contents: write`, `issues: read`,
   `pull-requests: read`, `checks: read`) by default, and `apply` (`issues: write`
   instead, `apply_changes: true`, `--apply`) only when the repo variable
   `APPLY_CHANGES` is `'true'`. The reusable workflow restores the `data` branch
   first, passes `GITHUB_TOKEN`/`REPO_MAINT_TOKEN`/`APPLY_CHANGES`, and force-pushes
   `public-data/` to `data`.
 - `.github/workflows/evals.yml`: on PRs touching agent code, evals, config or the
-  sandbox package, `run-evals.yml@v0.3.1` (`contents: read`, `max_usd: 1.00` per suite and
+  sandbox package, `run-evals.yml@9e4f342…` (v0.3.2) (`contents: read`, `max_usd: 1.00` per suite and
   `total_max_usd: 1.00` across them,
   regression threshold 0.05).
 

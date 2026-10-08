@@ -92,18 +92,63 @@ def test_get_json_is_conditional_with_a_cache_key(tmp_path):
     assert (tmp_path / "meta.json").is_file() and (tmp_path / "meta.json.meta.json").is_file()
 
 
-def test_paginate_returns_every_cached_page_on_a_first_page_304(tmp_path):
-    seen: list = []
+def _linked_pages_handler(pages, etag, seen, *, link_on_304=True):
+    """Serves ``pages`` (lists of items) at ``?page=1..n``, each 200 carrying a
+    ``Link: rel="next"`` to the following page, as GitHub does. The first page is
+    conditional on ``etag``; its 304 carries the same ``Link`` header (GitHub sends it)."""
+    base = f"{gh.GITHUB_API_BASE}/repos/o/r/issues?per_page=2"
+
+    def link(number: int) -> dict[str, str]:
+        if number >= len(pages):
+            return {}
+        return {
+            "link": f'<{base}&page={number + 1}>; rel="next", <{base}&page={len(pages)}>;'
+            ' rel="last"'
+        }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        page = request.url.params.get("page")
-        seen.append((page, request.headers.get("if-none-match")))
-        if page == "2":
-            return httpx.Response(200, json=[{"number": 3}])
-        if request.headers.get("if-none-match") == 'W/"p1"':
-            return httpx.Response(304)
-        return httpx.Response(200, json=[{"number": 1}, {"number": 2}], headers={"etag": 'W/"p1"'})
+        number = int(request.url.params.get("page", "1"))
+        seen.append((request.url.params.get("page"), request.headers.get("if-none-match")))
+        if number == 1 and request.headers.get("if-none-match") == etag:
+            return httpx.Response(304, headers=link(1) if link_on_304 else {})
+        headers = {**link(number), **({"etag": etag} if number == 1 else {})}
+        return httpx.Response(200, json=pages[number - 1], headers=headers)
 
+    return handler
+
+
+def test_paginate_with_a_cache_key_follows_link_next(tmp_path):
+    seen: list = []
+    pages = [[{"number": 1}, {"number": 2}], [{"number": 3}, {"number": 4}], [{"number": 5}]]
+    client = _client(_linked_pages_handler(pages, 'W/"p1"', seen), cache_dir=tmp_path)
+    page = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+
+    assert [i["number"] for i in page.items] == [1, 2, 3, 4, 5]
+    assert page.etag == 'W/"p1"' and page.not_modified is False
+    assert seen == [(None, None), ("2", None), ("3", None)]
+    assert json.loads((tmp_path / "issues.pages.json").read_text()) == {
+        "etag": 'W/"p1"',
+        "items": [{"number": n} for n in range(1, 6)],
+    }
+
+
+def test_paginate_with_a_cache_key_stops_without_a_next_link_even_on_a_full_page(tmp_path):
+    """No page-number guessing: a full first page without ``Link: rel="next"`` is the
+    whole collection, so no page-2 request is made."""
+    seen: list = []
+    handler = _linked_pages_handler([[{"number": 1}, {"number": 2}]], 'W/"p1"', seen)
+    client = _client(handler, cache_dir=tmp_path)
+    page = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+
+    assert [i["number"] for i in page.items] == [1, 2]
+    assert seen == [(None, None)]
+
+
+@pytest.mark.parametrize("link_on_304", [True, False])
+def test_paginate_returns_every_cached_page_on_a_first_page_304(tmp_path, link_on_304):
+    seen: list = []
+    pages = [[{"number": 1}, {"number": 2}], [{"number": 3}]]
+    handler = _linked_pages_handler(pages, 'W/"p1"', seen, link_on_304=link_on_304)
     client = _client(handler, cache_dir=tmp_path)
     first = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
     second = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
@@ -111,7 +156,67 @@ def test_paginate_returns_every_cached_page_on_a_first_page_304(tmp_path):
     assert [i["number"] for i in first.items] == [1, 2, 3]
     assert second.not_modified is True
     assert [i["number"] for i in second.items] == [1, 2, 3]
+    # The 304's Link header isn't followed: the saved pages already hold the rest.
     assert seen == [(None, None), ("2", None), (None, 'W/"p1"')]
+    assert client.not_modified_count == 1
+
+
+def test_paginate_refetch_after_a_304_follows_the_fresh_first_page_links(tmp_path):
+    seen: list = []
+    pages = [[{"number": 1}, {"number": 2}], [{"number": 3}]]
+    client = _client(_linked_pages_handler(pages, 'W/"p1"', seen), cache_dir=tmp_path)
+    client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+    (tmp_path / "issues.pages.json").unlink()
+    seen.clear()
+
+    page = client.paginate("/repos/o/r/issues", params={"per_page": 2}, cache_key="issues")
+    assert [i["number"] for i in page.items] == [1, 2, 3]
+    assert page.not_modified is False
+    assert seen == [(None, 'W/"p1"'), (None, None), ("2", None)]
+
+
+@pytest.mark.parametrize("cache", [True, False])
+def test_paginate_stops_when_a_later_page_is_gone(tmp_path, cache):
+    next_url = f"{gh.GITHUB_API_BASE}/repos/o/r/issues?per_page=100&page=2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(
+            200, json=[{"number": 1}], headers={"link": f'<{next_url}>; rel="next"'}
+        )
+
+    client = _client(handler, cache_dir=tmp_path if cache else None)
+    page = client.paginate("/repos/o/r/issues", cache_key="issues")
+    assert page.items == [{"number": 1}]
+
+
+@pytest.mark.parametrize("status", [200, 304])
+def test_conditional_reads_track_the_rate_limit_headers(tmp_path, status):
+    """Http.download's headers (on a 304 too) feed the §3 rate-limit floor, so a run
+    whose reads are mostly 304s still stops before exhausting the limit."""
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if status == 304 and request.headers.get("if-none-match"):
+            return httpx.Response(304, headers={"x-ratelimit-remaining": "42"})
+        remaining = "42" if status == 200 else "4999"
+        return httpx.Response(
+            200,
+            json={"full_name": "o/r"},
+            headers={"etag": 'W/"e1"', "x-ratelimit-remaining": remaining},
+        )
+
+    client = _client(handler, cache_dir=tmp_path)
+    client.get_json("/repos/o/r", cache_key="meta")
+    if status == 304:
+        assert client.rate_limit_remaining == 4999
+        client.get_json("/repos/o/r", cache_key="meta")
+    assert client.rate_limit_remaining == 42
+    with pytest.raises(gh.RateLimitLow):
+        client.get_json("/repos/o/r", cache_key="meta")
+    assert len(calls) == (1 if status == 200 else 2)
 
 
 def test_paginate_refetches_when_the_saved_pages_belong_to_another_etag(tmp_path):
