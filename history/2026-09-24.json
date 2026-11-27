@@ -1,0 +1,220 @@
+{
+  "meta": {
+    "agent": "repo_maint",
+    "schema_version": "1.0.0",
+    "run_id": "31cfaa7e-1862-4ff5-9349-a094eb6b7b0e",
+    "started_at": "2026-09-24T06:11:05Z",
+    "finished_at": "2026-09-24T06:11:12Z",
+    "status": "ok",
+    "data_changed": true,
+    "cost_usd": 0.0,
+    "model_usage": {
+      "fast": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "smart": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    "sources": [],
+    "github_requests": 22,
+    "github_304s": 12
+  },
+  "headline": "2 repos watched: 0 untriaged issues, 0 stale PRs.",
+  "key_stats": [
+    {
+      "label": "Untriaged issues",
+      "value": 0.0,
+      "format": "count",
+      "delta": null,
+      "delta_format": null,
+      "good_direction": "down"
+    },
+    {
+      "label": "Avg health",
+      "value": 92.0,
+      "format": "count",
+      "delta": null,
+      "delta_format": null,
+      "good_direction": "up"
+    }
+  ],
+  "mode": "report",
+  "repos": [
+    {
+      "full_name": "Kghaffari26/agents-core",
+      "url": "https://github.com/Kghaffari26/agents-core",
+      "role": "own",
+      "allow_apply": false,
+      "partial": false,
+      "health": {
+        "score": 91,
+        "grade": "A",
+        "breakdown": [
+          {
+            "reason": "Missing README, LICENSE, CONTRIBUTING",
+            "points": -9
+          }
+        ]
+      },
+      "counts": {
+        "open_issues": 0,
+        "untriaged": 0,
+        "untriaged_over_7d": 0,
+        "open_prs": 0,
+        "stale_prs": 0,
+        "no_response_count": 0
+      },
+      "median_first_response_hours": null,
+      "ci_default_branch": "success",
+      "days_since_release": null,
+      "activity_12w": {
+        "weeks": [
+          "2026-W28",
+          "2026-W29",
+          "2026-W30",
+          "2026-W31",
+          "2026-W32",
+          "2026-W33",
+          "2026-W34",
+          "2026-W35",
+          "2026-W36",
+          "2026-W37",
+          "2026-W38",
+          "2026-W39"
+        ],
+        "opened": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "closed": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "triage": [],
+      "stale_prs": [],
+      "changelog": {
+        "base_ref": null,
+        "base_date": "2026-08-25",
+        "source": "pull_requests",
+        "item_count": 0,
+        "suggested_version": null,
+        "markdown": "## Unreleased\n",
+        "narrative_source": "deterministic",
+        "model": null,
+        "generated_at": "2026-09-24T06:11:05Z",
+        "cached": true
+      }
+    },
+    {
+      "full_name": "Kghaffari26/real-estate-agent",
+      "url": "https://github.com/Kghaffari26/real-estate-agent",
+      "role": "own",
+      "allow_apply": false,
+      "partial": false,
+      "health": {
+        "score": 94,
+        "grade": "A",
+        "breakdown": [
+          {
+            "reason": "Missing LICENSE, CONTRIBUTING",
+            "points": -6
+          }
+        ]
+      },
+      "counts": {
+        "open_issues": 0,
+        "untriaged": 0,
+        "untriaged_over_7d": 0,
+        "open_prs": 0,
+        "stale_prs": 0,
+        "no_response_count": 0
+      },
+      "median_first_response_hours": null,
+      "ci_default_branch": "none",
+      "days_since_release": null,
+      "activity_12w": {
+        "weeks": [
+          "2026-W28",
+          "2026-W29",
+          "2026-W30",
+          "2026-W31",
+          "2026-W32",
+          "2026-W33",
+          "2026-W34",
+          "2026-W35",
+          "2026-W36",
+          "2026-W37",
+          "2026-W38",
+          "2026-W39"
+        ],
+        "opened": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "closed": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "triage": [],
+      "stale_prs": [],
+      "changelog": {
+        "base_ref": null,
+        "base_date": "2026-08-25",
+        "source": "pull_requests",
+        "item_count": 0,
+        "suggested_version": null,
+        "markdown": "## Unreleased\n",
+        "narrative_source": "deterministic",
+        "model": null,
+        "generated_at": "2026-09-24T06:11:05Z",
+        "cached": true
+      }
+    }
+  ],
+  "actions": []
+}
